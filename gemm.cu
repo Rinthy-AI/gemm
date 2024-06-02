@@ -129,15 +129,10 @@ void h_gemm(
     }
 }
 
-void initInputMatrix(INPUT_ELEMENT* mat, int len) {
+template<typename ELEMENT>
+void initMatrix(ELEMENT* mat, int len) {
     for (int idx = 0; idx < len; idx++) {
-        mat[idx] = static_cast<INPUT_ELEMENT>((rand() % 1000) / 100.0 - 5.0);
-    }
-}
-
-void initOutputMatrix(OUTPUT_ELEMENT* mat, int len) {
-    for (int idx = 0; idx < len; idx++) {
-        mat[idx] = static_cast<OUTPUT_ELEMENT>((rand() % 1000) / 100.0 - 5.0);
+        mat[idx] = static_cast<ELEMENT>((rand() % 1000) / 100.0 - 5.0);
     }
 }
 
@@ -157,22 +152,8 @@ bool verify(OUTPUT_ELEMENT* h_solution, OUTPUT_ELEMENT* h_C) {
     return true;
 }
 
-void printInputMat(INPUT_ELEMENT* mat, int rows, int cols) {
-    printf("[");
-    for (int r = 0; r < rows; r++) {
-        printf("[");
-        for (int c = 0; c < cols; c++) {
-            printf("%f,", mat[r * rows + c]);
-        }
-        printf("],");
-        if (r != rows - 1) {
-            printf("\n");
-        }
-    }
-    printf("]\n");
-}
-
-void printOutputMat(OUTPUT_ELEMENT* mat, int rows, int cols) {
+template<typename ELEMENT>
+void printMat(ELEMENT* mat, int rows, int cols) {
     printf("[");
     for (int r = 0; r < rows; r++) {
         printf("[");
@@ -201,11 +182,11 @@ int main() {
     printf("eFLOPS per byte: %f\n", static_cast<double>(TOTAL_NAIVE_FLOPS) / static_cast<double>(TOTAL_SIZE));
     srand(0);
     INPUT_ELEMENT* h_A = (INPUT_ELEMENT*)malloc(SIZE_A);
-    initInputMatrix(h_A, ROWS_A * COLS_A);
+    initMatrix<INPUT_ELEMENT>(h_A, ROWS_A * COLS_A);
     INPUT_ELEMENT* h_B = (INPUT_ELEMENT*)malloc(SIZE_B);
-    initInputMatrix(h_B, ROWS_B * COLS_B);
+    initMatrix<INPUT_ELEMENT>(h_B, ROWS_B * COLS_B);
     OUTPUT_ELEMENT* h_C = (OUTPUT_ELEMENT*)malloc(SIZE_C);
-    initOutputMatrix(h_C, ROWS_C * COLS_C);
+    initMatrix<OUTPUT_ELEMENT>(h_C, ROWS_C * COLS_C);
     OUTPUT_ELEMENT* h_C_orig = (OUTPUT_ELEMENT*)malloc(SIZE_C);
     memcpy(h_C_orig, h_C, SIZE_C);
     if (DEBUG_OUTPUT) {
@@ -214,11 +195,11 @@ int main() {
         printf("TRANSPOSE_A = %s\n", TRANSPOSE_A ? "true" : "false");
         printf("TRANSPOSE_B = %s\n", TRANSPOSE_B ? "true" : "false");
         printf("A = ");
-        printInputMat(h_A, ROWS_A, COLS_A);
+        printMat<INPUT_ELEMENT>(h_A, ROWS_A, COLS_A);
         printf("B = ");
-        printInputMat(h_B, ROWS_B, COLS_B);
+        printMat<INPUT_ELEMENT>(h_B, ROWS_B, COLS_B);
         printf("C = ");
-        printOutputMat(h_C, ROWS_C, COLS_C);
+        printMat<OUTPUT_ELEMENT>(h_C, ROWS_C, COLS_C);
     }
 
     // Device alloc
@@ -263,7 +244,7 @@ int main() {
 
     if (DEBUG_OUTPUT) {
         printf("h_C after device computation:\n");
-        printOutputMat(h_C, ROWS_C, COLS_C);
+        printMat<OUTPUT_ELEMENT>(h_C, ROWS_C, COLS_C);
     }
     if (DO_CPU_VERIFY) {
         // Verify result
@@ -278,7 +259,7 @@ int main() {
         );
         if (DEBUG_OUTPUT) {
             printf("CPU result:\n");
-            printOutputMat(h_C_orig, ROWS_C, COLS_C);
+            printMat<OUTPUT_ELEMENT>(h_C_orig, ROWS_C, COLS_C);
         }
         if (verify(h_C_orig, h_C)) {
             printf("Output correct\n");
