@@ -53,23 +53,24 @@ using namespace std;
 #endif
 
 #define VERIFY_TOLERANCE 0.005
+#define IDX(x, y, y_max) x * y_max + y
 
 const bool          DO_CPU_VERIFY = true;
 const bool          DEBUG_OUTPUT  = false;
 const INPUT_ELEMENT ALPHA         = 1.234;
 const INPUT_ELEMENT BETA          = 5.678;
-const unsigned long ROWS_A        = 128;
-const unsigned long COLS_A        = 128;
+const unsigned long ROWS_A        = 512;
+const unsigned long COLS_A        = 512;
 const unsigned long ROWS_B        = COLS_A;
 const unsigned long INNER_DIM     = COLS_A;
-const unsigned long COLS_B        = 128;
+const unsigned long COLS_B        = 512;
 const unsigned long ROWS_C        = ROWS_A;
 const unsigned long COLS_C        = COLS_B;
 const unsigned long ROWS_OUT      = ROWS_A;
 const unsigned long COLS_OUT      = COLS_B;
 const bool          TRANSPOSE_A   = false;
 const bool          TRANSPOSE_B   = false;
-const dim3          NUM_BLOCKS      (16,1,1);
+const dim3          NUM_BLOCKS      (256,1,1);
 const dim3          NUM_THREADS     (1024,1,1);
 // I use the term eFLOPS in this file to refer to "effective FLOPS", which
 // means "how fast would you have to do floating point operations with the
@@ -90,13 +91,15 @@ __global__ void d_gemm(
     bool t_B
 ) {
     // TODO write fast code here
-    // TODO add support for transposition
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int row = i / c_B;
     int col = i % c_B;
+    INPUT_ELEMENT a, b;
     C[i] *= beta;
     for (int offset = 0; offset < inner; offset++) {
-        C[i] += alpha * A[row * inner + offset] * B[offset * c_B + col];
+        a = t_A ? A[IDX(offset, row, inner)] : A[IDX(row, offset, inner)];
+        b = t_B ? B[IDX(col, offset, c_B)] : B[IDX(offset, col, c_B)];
+        C[i] += alpha * a * b;
     }
 }
 
@@ -113,12 +116,14 @@ void h_gemm(
     bool t_B
 ) {
     // CPU gemm to double-check GPU output and compare performance
-    // TODO add support for transposition
+    INPUT_ELEMENT a, b;
     for (int row = 0; row < r_A; row++) {
         for (int col = 0; col < c_B; col++) {
-            C[row * c_B + col] *= beta;
+            C[IDX(row, col, c_B)] *= beta;
             for (int offset = 0; offset < inner; offset++) {
-                C[row * c_B + col] += alpha * A[row * inner + offset] * B[col + c_B * offset];
+                a = t_A ? A[IDX(offset, row, inner)] : A[IDX(row, offset, inner)];
+                b = t_B ? B[IDX(col, offset, c_B)] : B[IDX(offset, col, c_B)];
+                C[row * c_B + col] += alpha * a * b;
             }
         }
     }
@@ -153,21 +158,33 @@ bool verify(OUTPUT_ELEMENT* h_solution, OUTPUT_ELEMENT* h_C) {
 }
 
 void printInputMat(INPUT_ELEMENT* mat, int rows, int cols) {
+    printf("[");
     for (int r = 0; r < rows; r++) {
+        printf("[");
         for (int c = 0; c < cols; c++) {
-            printf("%f ", mat[r * rows + c]);
+            printf("%f,", mat[r * rows + c]);
         }
-        printf("\n");
+        printf("],");
+        if (r != rows - 1) {
+            printf("\n");
+        }
     }
+    printf("]\n");
 }
 
 void printOutputMat(OUTPUT_ELEMENT* mat, int rows, int cols) {
+    printf("[");
     for (int r = 0; r < rows; r++) {
+        printf("[");
         for (int c = 0; c < cols; c++) {
-            printf("%f ", mat[r * rows + c]);
+            printf("%f,", mat[r * rows + c]);
         }
-        printf("\n");
+        printf("],");
+        if (r != rows - 1) {
+            printf("\n");
+        }
     }
+    printf("]\n");
 }
 
 int main() {
@@ -192,13 +209,15 @@ int main() {
     OUTPUT_ELEMENT* h_C_orig = (OUTPUT_ELEMENT*)malloc(SIZE_C);
     memcpy(h_C_orig, h_C, SIZE_C);
     if (DEBUG_OUTPUT) {
-        printf("ALPHA: %f\n", ALPHA);
-        printf("BETA: %f\n", BETA);
-        printf("A:\n");
+        printf("ALPHA = %f\n", ALPHA);
+        printf("BETA = %f\n", BETA);
+        printf("TRANSPOSE_A = %s\n", TRANSPOSE_A ? "true" : "false");
+        printf("TRANSPOSE_B = %s\n", TRANSPOSE_B ? "true" : "false");
+        printf("A = ");
         printInputMat(h_A, ROWS_A, COLS_A);
-        printf("B:\n");
+        printf("B = ");
         printInputMat(h_B, ROWS_B, COLS_B);
-        printf("C:\n");
+        printf("C = ");
         printOutputMat(h_C, ROWS_C, COLS_C);
     }
 
