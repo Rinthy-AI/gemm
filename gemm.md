@@ -17,8 +17,11 @@ aside from CUDA.
 This post is a **literate program**. That means that this file contains a
 complete program within it, in addition to explanatory natural language
 throughout. All you need to do to get the source code is extract the lines in
-all the code blocks and concatenate them. Everything you need is
-[here][github], except for the hardware, the `nvcc` compiler, and CUDA.
+all the code blocks and concatenate them. To run the code, clone [the
+repo][github] and run `make`. You need `nvcc` and CUDA. The compiled binary
+will be in the repo root and is called `gemm`. To play with other input and
+output types, matrix dimensions, transposition, and other parameters, change
+the `#define`s and constants in the code according to the descriptions below.
 
 [github]: https://github.com/Rinthy-AI/gemm
 
@@ -35,7 +38,28 @@ at a lower level than typical libraries.
 
 ## Definition of GEMM
 
-TODO
+GEMM stands for general matrix multiply. It is one of the Level 3 [Basic Linear
+Algebra Subprograms][blas] (BLAS) and takes the form
+
+[blas]: https://dl.acm.org/doi/pdf/10.1145/77626.79170
+
+$$\mathbf{C} \leftarrow \alpha\mathbf{A}\mathbf{B} + \beta\mathbf{C}$$
+
+where $\mathbf{A}$, $\mathbf{B}$, and $\mathbf{C}$ are real matrices and
+$\alpha$ and $\beta$ are real scalars. $\mathbf{A}$ and/or $\mathbf{B}$ may be
+transposed at the user's option.
+
+Note that $\mathbf{C}$ appears on both sides of the assignment operator. This
+means that the existing values of $\mathbf{C}$ must be a part of the inputs to
+the GEMM algorithm *and also* the outputs must be stored in $\mathbf{C}$. In
+practice, to avoid intermediate allocations we have to compute
+$\beta\mathbf{C}$ first and then accumulate the results of
+$\alpha\mathbf{A}\mathbf{B}$ into $\mathbf{C}$ second.
+
+I chose GEMM as the goal for this program because of its usefulness in machine
+learning. A fast GEMM implementation---or at least one that teaches me
+about the hardware and programming models---has value for any future work we
+might do in this area.
 
 ## Includes
 
@@ -78,6 +102,8 @@ See [this table][nvidia-in-out-types].
 #define UINT8_IN_INT32_OUT
 ```
 
+TODO
+
 | WMMA Dimensions (m-n-k) | `#define`      |
 |-------------------------|----------------|
 | 16 × 16 ×  16           | `MNK_16x16x16` |
@@ -113,7 +139,11 @@ above.
 #else
     #error "Selected matrix element type is not supported"
 #endif
+```
 
+TODO
+
+```cpp
 #if defined(MNK_16x16x16)
     const unsigned long WMMA_N = 16;
     const unsigned long WMMA_M = 16;
@@ -123,7 +153,11 @@ above.
     const unsigned long WMMA_M = 8;
     const unsigned long WMMA_K = 4;
 #endif
+```
 
+TODO
+
+```cpp
 #define IDX(x, y, y_max) x * y_max + y
 ```
 
@@ -157,6 +191,8 @@ const dim3          NUM_BLOCKS      (64,64,1);
 const dim3          NUM_THREADS     (WARP_SIZE,4,4);
 ```
 
+TODO
+
 I use the term eTOPS in this file to refer to "effective TOPS", which means
 "how fast would you have to do arithmetic operations on the given types with
 the naive gemm algorithm to match the observed speed"
@@ -168,34 +204,15 @@ const unsigned long long TOTAL_NAIVE_OPS = (2 * INNER_DIM - 1) * (ROWS_OUT * COL
 ## Forward Declarations
 
 This program has a few utility functions. Their implementation details aren't
-important for understanding the GEMM kernel, so you can find them in [the
-appendix](#appendix-utility-functions). Still, we have to use [forward
-declaration][fwd-decl] to tell the compiler what signatures these functions
-have before we call them.
+important for understanding the GEMM kernel, so you can find the full
+definitions in [the appendix](#appendix-utility-functions). Still, we have to
+use [forward declaration][fwd-decl] to tell the compiler what signatures these
+functions have before we call them.
 
 [fwd-decl]: https://en.wikipedia.org/wiki/Forward_declaration
 
-The utility functions and their purposes are:
-
-- `h_gemm` does the same GEMM operation as the kernel, except it does it on the
-  CPU instead. When `DO_CPU_VERIFY` is `true`, we call this function with the
-same inputs as the kernel so we can make sure the kernel is producing the
-correct output. The output is passed to `verify` for actual verification.
-- `verify` compares the values of the given matrices element by element to make
-  sure that they're equal. For floating point types, a small tolerance is
-acceptable. Returns `true` if the matrices are equal and returns `false`
-otherwise. Also prints the offending element pair in the `false` case.
-- `initMatrix` fills the given matrix with random values. The range and
-  distribution of the values are not specified.
-- `printMat` prints the given matrix in a form that can be easily copied and
-  pasted into a Python REPL. This is useful for verification or inspection with
-`numpy`. Only called when `DEBUG_OUTPUT` is `true`.
-
-Note that `initMatrix` and `printMat` are both templates over a generic
-`ELEMENT`. This is necessary because `INPUT_ELEMENT` and `OUTPUT_ELEMENT` are
-usually different, so we would usually need two different function signatures.
-The template syntax lets us avoid code duplication by specifying the type we
-want at the call site and telling the compiler to figure out the rest.
+<details>
+<summary>Click to show/hide forward declarations</summary>
 
 ```cpp
 void h_gemm(
@@ -220,9 +237,12 @@ template<typename ELEMENT>
 void printMat(ELEMENT* mat, int rows, int cols);
 ```
 
+</details>
+
 # Kernel
 
-TODO
+This is the code that actually runs on the GPU. Let's examine the function
+signature first.
 
 ```cpp
 __global__ void d_gemm(
@@ -237,23 +257,40 @@ __global__ void d_gemm(
     bool t_A,
     bool t_B
 ) {
-    // TODO write fast code here
+```
+
+TODO
+
+```cpp
     // TODO add support for arbitrary matrix dimensions
     using namespace nvcuda::wmma;
     int warp_row = (blockIdx.y * blockDim.z + threadIdx.z) * WMMA_M;
     int warp_col = (blockIdx.x * blockDim.y + threadIdx.y) * WMMA_N;
     int tile_run = inner / WMMA_K;
+```
 
+TODO
+
+```cpp
     fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> A_frag;
     fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> B_frag;
     fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> A_frag_t;
     fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> B_frag_t;
     fragment<accumulator, WMMA_N, WMMA_M, WMMA_K, OUTPUT_ELEMENT> C_frag;
+```
 
+TODO
+
+```cpp
     load_matrix_sync(C_frag, C + IDX(warp_row, warp_col, c_B), c_B, mem_row_major);
     for (int i = 0; i < C_frag.num_elements; i++) {
         C_frag.x[i] *= beta;
     }
+```
+
+TODO
+
+```cpp
     // TODO not sure if y_max needs changing here
     if (t_A && t_B) {
         for (int i = 0; i < tile_run; i++) {
@@ -264,6 +301,11 @@ __global__ void d_gemm(
             }
             mma_sync(C_frag, A_frag_t, B_frag_t, C_frag);
         }
+```
+
+TODO
+
+```cpp
     } else if (t_A && !t_B) {
         for (int i = 0; i < tile_run; i++) {
             load_matrix_sync(A_frag_t, A + IDX(i * WMMA_K, warp_row, inner), inner);
@@ -292,11 +334,18 @@ __global__ void d_gemm(
             mma_sync(C_frag, A_frag, B_frag, C_frag);
         }
     }
+```
+
+TODO
+
+```cpp
     store_matrix_sync(C + IDX(warp_row, warp_col, c_B), C_frag, c_B, mem_row_major);
 }
 ```
 
 # Main Function
+
+Now we come to the entry point of the program.
 
 ```cpp
 int main() {
@@ -304,29 +353,120 @@ int main() {
 
 ## Host Allocation and Initialization
 
-TODO
+First, we check that the dimensions of the blocks and grids match the number of
+elements in the output matrix. It's easy to get these wrong because reasoning
+about all the different loops and dimensions is often difficult. This runtime
+check catches a decent number of errors in this category.
+
+We assume that `NUM_BLOCKS.z` is equal to `1`, which implies a two-dimensional
+grid. We also assume that `NUM_THREADS.x` is equal to `WARP_SIZE`. The tensor
+cores work most efficiently when the maximum number of warps per scheduler are
+executing the same instruction, so we encourage that by setting that as one of
+the block dimensions. We know that the dimensions of a single tensor core
+output matrix are equal to `(WMMA_N, WMMA_M)` elements. Both of those values
+come straight from Nvidia's documentation and are `#define`d above. All we need
+to do is multiply the number of elements per output tile by the number of
+tiles, and we'll get the number of output elements for this configuration. That
+value should always match the number of elements in the actual output array.
 
 ```cpp
-    assert(NUM_BLOCKS.x * NUM_THREADS.y * WMMA_N * NUM_BLOCKS.y * NUM_THREADS.z * WMMA_M == ROWS_OUT * COLS_OUT);
+    assert(
+        NUM_BLOCKS.x * NUM_THREADS.y * WMMA_N
+        * NUM_BLOCKS.y * NUM_THREADS.z * WMMA_M
+        == ROWS_OUT * COLS_OUT
+    );
+```
+
+To allocate memory for our three matrices, we need to know their sizes in
+bytes. We'll compute those values now by finding the number of elements and
+then multiplying that value by the number of bytes per element. We also print
+the dimensions and sizes of the matrices.
+
+```cpp
     size_t SIZE_A = ROWS_A * COLS_A * sizeof(INPUT_ELEMENT);
-    printf("A: %lu × %lu elements (%lu B each) => %lu B\n", ROWS_A, COLS_A, sizeof(INPUT_ELEMENT), SIZE_A);
+    printf(
+        "A: %lu × %lu elements (%lu B each) => %lu B\n",
+        ROWS_A,
+        COLS_A,
+        sizeof(INPUT_ELEMENT),
+        SIZE_A
+    );
     size_t SIZE_B = ROWS_B * COLS_B * sizeof(INPUT_ELEMENT);
-    printf("B: %lu × %lu elements (%lu B each) => %lu B\n", ROWS_B, COLS_B, sizeof(INPUT_ELEMENT), SIZE_B);
+    printf(
+        "B: %lu × %lu elements (%lu B each) => %lu B\n",
+        ROWS_B,
+        COLS_B,
+        sizeof(INPUT_ELEMENT),
+        SIZE_B
+    );
     size_t SIZE_C = ROWS_C * COLS_C * sizeof(OUTPUT_ELEMENT);
-    printf("C: %lu × %lu elements (%lu B each) => %lu B\n", ROWS_C, COLS_C, sizeof(OUTPUT_ELEMENT), SIZE_C);
+    printf(
+        "C: %lu × %lu elements (%lu B each) => %lu B\n",
+        ROWS_C,
+        COLS_C,
+        sizeof(OUTPUT_ELEMENT),
+        SIZE_C
+    );
+```
+
+Now we print some information about the operation we're about to run. It's
+useful to know the [arithmetic intensity][arith-intens] of the computation,
+which is the ratio of the total number of math operations to the total number
+of bytes that need to move during the computation. This figure gives some
+insight into whether or not the computation will be limited by the compute
+performance or memory bandwidth of the target platform.
+
+[arith-intens]: https://en.wikipedia.org/wiki/Roofline_model#Arithmetic_intensity
+
+```cpp
     size_t TOTAL_SIZE = SIZE_A + SIZE_B + SIZE_C;
-    printf("Total eTOPS: %llu\n", TOTAL_NAIVE_OPS);
+    printf("Total eOPS: %llu\n", TOTAL_NAIVE_OPS);
     printf("Total bytes: %lu\n", TOTAL_SIZE);
-    printf("eTOPS per byte: %f\n", static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE));
+    printf("eOPS per byte: %f\n", static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE));
+```
+
+Set the random seed to a fixed value so we always get the same element values
+for a given configuration. This eliminates a source of random variation in
+performance.
+
+```cpp
     srand(0);
+```
+
+Now we allocate memory for `A`, `B`, and `C` and initialize them to random
+values. Note our use of `INPUT_ELEMENT` and `OUTPUT_ELEMENT` in the calls to
+`initMatrix`, which tells the compiler to generate function implementations for
+those specific types using the template defined elsewhere.
+
+```cpp
     INPUT_ELEMENT* h_A = (INPUT_ELEMENT*)malloc(SIZE_A);
     initMatrix<INPUT_ELEMENT>(h_A, ROWS_A * COLS_A);
     INPUT_ELEMENT* h_B = (INPUT_ELEMENT*)malloc(SIZE_B);
     initMatrix<INPUT_ELEMENT>(h_B, ROWS_B * COLS_B);
     OUTPUT_ELEMENT* h_C = (OUTPUT_ELEMENT*)malloc(SIZE_C);
     initMatrix<OUTPUT_ELEMENT>(h_C, ROWS_C * COLS_C);
+```
+
+If we're going to do CPU verification later, then we need an original copy of
+the `C` matrix. GEMM modifies `C` in the general case, so running the kernel
+changes the values in `h_C` after copying them back from the GPU.  We'll save a
+copy of the original values in `h_C_orig`. We don't actually need to do this
+unless `DO_CPU_VERIFY` is `true`, but adding the extra logic to handle
+conditionally allocating and freeing the memory isn't worth the benefit in my
+opinion, so we just do it every time.
+
+```cpp
     OUTPUT_ELEMENT* h_C_orig = (OUTPUT_ELEMENT*)malloc(SIZE_C);
     memcpy(h_C_orig, h_C, SIZE_C);
+```
+
+If `DEBUG_OUTPUT` is `true`, then we'll print whether `A` and `B` will be
+transposed during the operation, as well as the initial contents of `A`, `B`,
+and `C`. The `printMat` function is generic over the element type---just like
+`initMatrix` above---and prints the matrix elements in a format that can be
+easily copied into a Python REPL.
+
+```cpp
     if (DEBUG_OUTPUT) {
         #if defined(FP64_IN_OUT)
             printf("ALPHA = %f\n", ALPHA);
@@ -348,7 +488,9 @@ TODO
 
 ## Device Allocation and Initialization
 
-TODO
+The inputs are allocated and initialized on the CPU, but to do the GEMM
+operation we need to move them to the GPU. CUDA has functions in its API for
+handling this.
 
 ```cpp
     INPUT_ELEMENT* d_A;
@@ -361,33 +503,56 @@ TODO
     cudaMemcpy(d_A, h_A, SIZE_A, cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, h_B, SIZE_B, cudaMemcpyHostToDevice);
     cudaMemcpy(d_C, h_C, SIZE_C, cudaMemcpyHostToDevice);
+```
 
+We're almost ready. If we were to launch the kernel now, we might accidentally
+include the device initialization in our speed measurement. We can avoid that
+by initializing the device explicitly now.
+
+```cpp
     cudaError_t initResult = cudaInitDevice(0, cudaDeviceScheduleAuto, 0);
     if (initResult != cudaSuccess) {
         printf("Failed to init device\n");
-        return 1;
-    }
-    cudaError_t setResult = cudaSetDevice(0);
-    if (setResult != cudaSuccess) {
-        printf("Failed to set device\n");
         return 1;
     }
 ```
 
 ## Kernel Launch and Speed Measurement
 
-TODO
+We're finally done setting up. We can launch the kernel and measure the time it
+takes to execute. The call to `cudaDeviceSynchronize` guarantees that the GPU
+will finish its most recent kernel before advancing to the next line. Normally,
+CPU execution continues after a kernel launch---which is the point of having a
+GPU at all---and that's usually the desired behavior. In this case, we *want*
+to block on the kernel's execution because we're trying to measure how long it
+takes to run.
 
 ```cpp
     chrono::steady_clock::time_point start = chrono::steady_clock::now();
-    d_gemm<<<NUM_BLOCKS,NUM_THREADS>>>(d_A, d_B, d_C, ROWS_A, INNER_DIM, COLS_B, ALPHA, BETA, TRANSPOSE_A, TRANSPOSE_B);
+    d_gemm<<<NUM_BLOCKS,NUM_THREADS>>>(
+        d_A,
+        d_B,
+        d_C,
+        ROWS_A,
+        INNER_DIM,
+        COLS_B,
+        ALPHA,
+        BETA,
+        TRANSPOSE_A,
+        TRANSPOSE_B
+    );
     cudaDeviceSynchronize();
     chrono::steady_clock::time_point end = chrono::steady_clock::now();
+```
 
+Get the number of microseconds between the start and end of the kernel's
+runtime, and then report some information about its effective speed.
+
+```cpp
     long d_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
-    double etops = static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(d_elapsed) / 1e6);
-    printf("Device done in %lu microseconds (%f eTOPS)\n", d_elapsed, etops / 1e12);
-    printf("%f%% of theoretical max\n", etops / MAX_OPS * 100.0);
+    double eops = static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(d_elapsed) / 1e6);
+    printf("Device done in %lu microseconds (%f eTOPS)\n", d_elapsed, eops / 1e12);
+    printf("%f%% of theoretical max\n", eops / MAX_OPS * 100.0);
 ```
 
 ## Checking the Result
@@ -428,7 +593,10 @@ TODO
 
 ## Cleaning Up
 
-TODO
+We've done what we came here to do. All we really need to do now is return
+zero, but it doesn't hurt to deallocate all of the memory we've been using. I
+think the operating system would take care of this for us after the process
+terminates, but for completeness we might as well do it ourselves.
 
 ```cpp
     free(h_A);
@@ -446,8 +614,13 @@ TODO
 # Appendix: Utility Functions
 
 These are the definitions of the utility functions that we declared
-[above](#forward-declarations). For the purposes of these functions, see that
-section.
+[above](#forward-declarations).
+
+Note that `initMatrix` and `printMat` are both templates over a generic
+`ELEMENT`. This is necessary because `INPUT_ELEMENT` and `OUTPUT_ELEMENT` are
+usually different, so we would usually need two different function signatures.
+The template syntax lets us avoid code duplication by specifying the type we
+want at the call site and telling the compiler to figure out the rest.
 
 ## `h_gemm`
 
@@ -478,6 +651,9 @@ values in it.) Then, we do a dot product of the corresponding row in `A` and
 the corresponding column in `B`. We have to account for transposition of both
 inputs, but that can be done easily by swapping the arguments to the `IDX`
 macro. Finally, we scale the result by `alpha` and accumulate it into `C`.
+
+This function is only called when `DO_CPU_VERIFY` is `true`. For large
+matrices, this takes a long time.
 
 ```cpp
     INPUT_ELEMENT a, b;
@@ -562,6 +738,9 @@ be surrounded by `[]` and the elements and rows must be separated by `,`. We
 loop over the rows and colums, emitting characters and elements as necessary to
 satisfy these requirements. As with `verify` above, different `printf` calls
 are needed depending on the type.
+
+This function is only called when `DEBUG_OUTPUT` is `true`. For large matrices,
+this produces a lot of output.
 
 ```cpp
 template<typename ELEMENT>
