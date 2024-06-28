@@ -158,6 +158,13 @@ TODO
 TODO
 
 ```cpp
+#define TRANSPOSE_A false
+#define TRANSPOSE_B false
+```
+
+TODO
+
+```cpp
 #define IDX(x, y, y_max) x * y_max + y
 ```
 
@@ -184,8 +191,6 @@ const unsigned long ROWS_C        = ROWS_A;
 const unsigned long COLS_C        = COLS_B;
 const unsigned long ROWS_OUT      = ROWS_A;
 const unsigned long COLS_OUT      = COLS_B;
-const bool          TRANSPOSE_A   = false;
-const bool          TRANSPOSE_B   = false;
 const unsigned int  WARP_SIZE     = 32;
 const dim3          NUM_BLOCKS      (64,64,1);
 const dim3          NUM_THREADS     (WARP_SIZE,4,4);
@@ -198,7 +203,8 @@ I use the term eTOPS in this file to refer to "effective TOPS", which means
 the naive gemm algorithm to match the observed speed"
 
 ```cpp
-const unsigned long long TOTAL_NAIVE_OPS = (2 * INNER_DIM - 1) * (ROWS_OUT * COLS_OUT) + (ROWS_OUT * COLS_OUT) * 3;
+const unsigned long long TOTAL_NAIVE_OPS = (2 * INNER_DIM - 1) * (ROWS_OUT * COLS_OUT)
+                                         + (ROWS_OUT * COLS_OUT) * 3;
 ```
 
 ## Forward Declarations
@@ -223,9 +229,7 @@ void h_gemm(
     unsigned long inner,
     unsigned long c_B,
     INPUT_ELEMENT alpha,
-    INPUT_ELEMENT beta,
-    bool t_A,
-    bool t_B
+    INPUT_ELEMENT beta
 );
 
 bool verify(OUTPUT_ELEMENT* h_solution, OUTPUT_ELEMENT* h_C);
@@ -253,9 +257,7 @@ __global__ void d_gemm(
     unsigned long inner,
     unsigned long c_B,
     INPUT_ELEMENT alpha,
-    INPUT_ELEMENT beta,
-    bool t_A,
-    bool t_B
+    INPUT_ELEMENT beta
 ) {
 ```
 
@@ -272,10 +274,20 @@ TODO
 TODO
 
 ```cpp
-    fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> A_frag;
-    fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> B_frag;
-    fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> A_frag_t;
-    fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> B_frag_t;
+    #if TRANSPOSE_A
+        fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> A_frag;
+        #define IDX_A IDX(i * WMMA_K, warp_row, inner)
+    #else
+        fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> A_frag;
+        #define IDX_A IDX(warp_row, i * WMMA_K, inner)
+    #endif
+    #if TRANSPOSE_B
+        fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> B_frag;
+        #define IDX_B IDX(warp_col, i * WMMA_K, c_B)
+    #else
+        fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> B_frag;
+        #define IDX_B IDX(i * WMMA_K, warp_col, c_B)
+    #endif
     fragment<accumulator, WMMA_N, WMMA_M, WMMA_K, OUTPUT_ELEMENT> C_frag;
 ```
 
@@ -292,47 +304,13 @@ TODO
 
 ```cpp
     // TODO not sure if y_max needs changing here
-    if (t_A && t_B) {
-        for (int i = 0; i < tile_run; i++) {
-            load_matrix_sync(A_frag_t, A + IDX(i * WMMA_K, warp_row, inner), inner);
-            load_matrix_sync(B_frag_t, B + IDX(warp_col, i * WMMA_K, c_B), c_B);
-            for (int i = 0; i < A_frag_t.num_elements; i++) {
-                A_frag_t.x[i] *= alpha;
-            }
-            mma_sync(C_frag, A_frag_t, B_frag_t, C_frag);
+    for (int i = 0; i < tile_run; i++) {
+        load_matrix_sync(A_frag, A + IDX_A, inner);
+        load_matrix_sync(B_frag, B + IDX_B, c_B);
+        for (int i = 0; i < A_frag.num_elements; i++) {
+            A_frag.x[i] *= alpha;
         }
-```
-
-TODO
-
-```cpp
-    } else if (t_A && !t_B) {
-        for (int i = 0; i < tile_run; i++) {
-            load_matrix_sync(A_frag_t, A + IDX(i * WMMA_K, warp_row, inner), inner);
-            load_matrix_sync(B_frag, B + IDX(i * WMMA_K, warp_col, c_B), c_B);
-            for (int i = 0; i < A_frag_t.num_elements; i++) {
-                A_frag_t.x[i] *= alpha;
-            }
-            mma_sync(C_frag, A_frag_t, B_frag, C_frag);
-        }
-    } else if (!t_A && t_B) {
-        for (int i = 0; i < tile_run; i++) {
-            load_matrix_sync(A_frag, A + IDX(warp_row, i * WMMA_K, inner), inner);
-            load_matrix_sync(B_frag_t, B + IDX(warp_col, i * WMMA_K, c_B), c_B);
-            for (int i = 0; i < A_frag.num_elements; i++) {
-                A_frag.x[i] *= alpha;
-            }
-            mma_sync(C_frag, A_frag, B_frag_t, C_frag);
-        }
-    } else if (!t_A && !t_B) {
-        for (int i = 0; i < tile_run; i++) {
-            load_matrix_sync(A_frag, A + IDX(warp_row, i * WMMA_K, inner), inner);
-            load_matrix_sync(B_frag, B + IDX(i * WMMA_K, warp_col, c_B), c_B);
-            for (int i = 0; i < A_frag.num_elements; i++) {
-                A_frag.x[i] *= alpha;
-            }
-            mma_sync(C_frag, A_frag, B_frag, C_frag);
-        }
+        mma_sync(C_frag, A_frag, B_frag, C_frag);
     }
 ```
 
@@ -422,7 +400,10 @@ performance or memory bandwidth of the target platform.
     size_t TOTAL_SIZE = SIZE_A + SIZE_B + SIZE_C;
     printf("Total eOPS: %llu\n", TOTAL_NAIVE_OPS);
     printf("Total bytes: %lu\n", TOTAL_SIZE);
-    printf("eOPS per byte: %f\n", static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE));
+    printf(
+        "eOPS per byte: %f\n",
+        static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE)
+    );
 ```
 
 Set the random seed to a fixed value so we always get the same element values
@@ -537,9 +518,7 @@ takes to run.
         INNER_DIM,
         COLS_B,
         ALPHA,
-        BETA,
-        TRANSPOSE_A,
-        TRANSPOSE_B
+        BETA
     );
     cudaDeviceSynchronize();
     chrono::steady_clock::time_point end = chrono::steady_clock::now();
@@ -568,7 +547,7 @@ TODO
         cudaMemcpy(h_C, d_C, SIZE_C, cudaMemcpyDeviceToHost);
 
         start = chrono::steady_clock::now();
-        h_gemm(h_A, h_B, h_C_orig, ROWS_A, INNER_DIM, COLS_B, ALPHA, BETA, TRANSPOSE_A, TRANSPOSE_B);
+        h_gemm(h_A, h_B, h_C_orig, ROWS_A, INNER_DIM, COLS_B, ALPHA, BETA);
         end = chrono::steady_clock::now();
         long h_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
         printf(
@@ -633,9 +612,7 @@ void h_gemm(
     unsigned long inner,
     unsigned long c_B,
     INPUT_ELEMENT alpha,
-    INPUT_ELEMENT beta,
-    bool t_A,
-    bool t_B
+    INPUT_ELEMENT beta
 ) {
 ```
 
@@ -661,8 +638,16 @@ matrices, this takes a long time.
         for (int col = 0; col < c_B; col++) {
             C[IDX(row, col, c_B)] *= beta;
             for (int offset = 0; offset < inner; offset++) {
-                a = t_A ? A[IDX(offset, row, inner)] : A[IDX(row, offset, inner)];
-                b = t_B ? B[IDX(col, offset, c_B)] : B[IDX(offset, col, c_B)];
+                #if TRANSPOSE_A
+                    a = A[IDX(offset, row, inner)];
+                #else
+                    a = A[IDX(row, offset, inner)];
+                #endif
+                #if TRANSPOSE_B
+                    b = B[IDX(col, offset, c_B)];
+                #else
+                    b = B[IDX(offset, col, c_B)];
+                #endif
                 C[IDX(row, col, c_B)] += alpha * a * b;
             }
         }
