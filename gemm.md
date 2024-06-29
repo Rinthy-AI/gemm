@@ -168,32 +168,43 @@ TODO
 #define IDX(x, y, y_max) x * y_max + y
 ```
 
+TODO
+
+```cpp
+#define RND_UP_MULT(n, m) (n % m == 0) ? ((n / m) * m) : ((n / m + 1) * m)
+```
+
 ## Constants
 
 TODO
 
 ```cpp
-const bool          DO_CPU_VERIFY = false;
-const bool          DEBUG_OUTPUT  = false;
+const bool          DO_CPU_VERIFY    = false;
+const bool          DEBUG_OUTPUT     = false;
 #if defined(F64_IN_OUT)
-    const INPUT_ELEMENT ALPHA     = 1.234;
-    const INPUT_ELEMENT BETA      = 5.678;
+    const INPUT_ELEMENT ALPHA        = 1.234;
+    const INPUT_ELEMENT BETA         = 5.678;
 #elif defined(UINT8_IN_INT32_OUT)
-    const INPUT_ELEMENT ALPHA     = 2;
-    const INPUT_ELEMENT BETA      = 3;
+    const INPUT_ELEMENT ALPHA        = 2;
+    const INPUT_ELEMENT BETA         = 3;
 #endif
-const unsigned long ROWS_A        = 4096;
-const unsigned long COLS_A        = 4096;
-const unsigned long ROWS_B        = COLS_A;
-const unsigned long INNER_DIM     = COLS_A;
-const unsigned long COLS_B        = 4096;
-const unsigned long ROWS_C        = ROWS_A;
-const unsigned long COLS_C        = COLS_B;
-const unsigned long ROWS_OUT      = ROWS_A;
-const unsigned long COLS_OUT      = COLS_B;
-const unsigned int  WARP_SIZE     = 32;
-const dim3          NUM_BLOCKS      (64,64,1);
-const dim3          NUM_THREADS     (WARP_SIZE,4,4);
+const unsigned long ROWS_A           = 4096;
+const unsigned long ROWS_A_PADDED    = RND_UP_MULT(ROWS_A, WMMA_M);
+const unsigned long COLS_A           = 4096;
+const unsigned long COLS_A_PADDED    = RND_UP_MULT(COLS_A, WMMA_K);
+const unsigned long ROWS_B           = COLS_A;
+const unsigned long ROWS_B_PADDED    = COLS_A_PADDED;
+const unsigned long INNER_DIM        = COLS_A;
+const unsigned long INNER_DIM_PADDED = COLS_A_PADDED;
+const unsigned long COLS_B           = 4096;
+const unsigned long COLS_B_PADDED    = RND_UP_MULT(COLS_B, WMMA_N);
+const unsigned long ROWS_C           = ROWS_A;
+const unsigned long ROWS_C_PADDED    = ROWS_A_PADDED;
+const unsigned long COLS_C           = COLS_B;
+const unsigned long COLS_C_PADDED    = COLS_B_PADDED;
+const unsigned int  WARP_SIZE        = 32;
+const dim3          NUM_BLOCKS         (64,64,1);
+const dim3          NUM_THREADS        (WARP_SIZE,4,4);
 ```
 
 TODO
@@ -203,8 +214,8 @@ I use the term eTOPS in this file to refer to "effective TOPS", which means
 the naive gemm algorithm to match the observed speed"
 
 ```cpp
-const unsigned long long TOTAL_NAIVE_OPS = (2 * INNER_DIM - 1) * (ROWS_OUT * COLS_OUT)
-                                         + (ROWS_OUT * COLS_OUT) * 3;
+const unsigned long long TOTAL_NAIVE_OPS = (2 * INNER_DIM - 1) * (ROWS_C * COLS_C)
+                                         + (ROWS_C * COLS_C) * 3;
 ```
 
 ## Forward Declarations
@@ -266,8 +277,8 @@ TODO
 ```cpp
     // TODO add support for arbitrary matrix dimensions
     using namespace nvcuda::wmma;
-    int warp_row = (blockIdx.y * blockDim.z + threadIdx.z) * WMMA_M;
-    int warp_col = (blockIdx.x * blockDim.y + threadIdx.y) * WMMA_N;
+    int warp_row = (blockIdx.x * blockDim.y + threadIdx.y) * WMMA_M;
+    int warp_col = (blockIdx.y * blockDim.z + threadIdx.z) * WMMA_N;
     int tile_run = inner / WMMA_K;
 ```
 
@@ -348,11 +359,12 @@ tiles, and we'll get the number of output elements for this configuration. That
 value should always match the number of elements in the actual output array.
 
 ```cpp
-    assert(
+    // TODO fix: doesn't work with non-multiple dimensions
+    /*assert(
         NUM_BLOCKS.x * NUM_THREADS.y * WMMA_N
         * NUM_BLOCKS.y * NUM_THREADS.z * WMMA_M
-        == ROWS_OUT * COLS_OUT
-    );
+        == ROWS_C * COLS_C
+    );*/
 ```
 
 To allocate memory for our three matrices, we need to know their sizes in
@@ -363,27 +375,51 @@ the dimensions and sizes of the matrices.
 ```cpp
     size_t SIZE_A = ROWS_A * COLS_A * sizeof(INPUT_ELEMENT);
     printf(
-        "A: %lu × %lu elements (%lu B each) => %lu B\n",
+        "A original   : %5lu × %5lu elements, %lu B => %9lu B\n",
         ROWS_A,
         COLS_A,
         sizeof(INPUT_ELEMENT),
         SIZE_A
     );
+    size_t SIZE_A_PADDED = ROWS_A_PADDED * COLS_A_PADDED * sizeof(INPUT_ELEMENT);
+    printf(
+        "    padded   : %5lu × %5lu elements, %lu B => %9lu B\n",
+        ROWS_A_PADDED,
+        COLS_A_PADDED,
+        sizeof(INPUT_ELEMENT),
+        SIZE_A_PADDED
+    );
     size_t SIZE_B = ROWS_B * COLS_B * sizeof(INPUT_ELEMENT);
     printf(
-        "B: %lu × %lu elements (%lu B each) => %lu B\n",
+        "B original   : %5lu × %5lu elements, %lu B => %9lu B\n",
         ROWS_B,
         COLS_B,
         sizeof(INPUT_ELEMENT),
         SIZE_B
     );
+    size_t SIZE_B_PADDED = ROWS_B_PADDED * COLS_B_PADDED * sizeof(INPUT_ELEMENT);
+    printf(
+        "    padded   : %5lu × %5lu elements, %lu B => %9lu B\n",
+        ROWS_B_PADDED,
+        COLS_B_PADDED,
+        sizeof(INPUT_ELEMENT),
+        SIZE_B_PADDED
+    );
     size_t SIZE_C = ROWS_C * COLS_C * sizeof(OUTPUT_ELEMENT);
     printf(
-        "C: %lu × %lu elements (%lu B each) => %lu B\n",
+        "C original   : %5lu × %5lu elements, %lu B => %9lu B\n",
         ROWS_C,
         COLS_C,
         sizeof(OUTPUT_ELEMENT),
         SIZE_C
+    );
+    size_t SIZE_C_PADDED = ROWS_C_PADDED * COLS_C_PADDED * sizeof(OUTPUT_ELEMENT);
+    printf(
+        "    padded   : %5lu × %5lu elements, %lu B => %9lu B\n\n",
+        ROWS_C_PADDED,
+        COLS_C_PADDED,
+        sizeof(OUTPUT_ELEMENT),
+        SIZE_C_PADDED
     );
 ```
 
@@ -398,10 +434,10 @@ performance or memory bandwidth of the target platform.
 
 ```cpp
     size_t TOTAL_SIZE = SIZE_A + SIZE_B + SIZE_C;
-    printf("Total eOPS: %llu\n", TOTAL_NAIVE_OPS);
-    printf("Total bytes: %lu\n", TOTAL_SIZE);
+    printf("Total eOPS   : %12llu\n", TOTAL_NAIVE_OPS);
+    printf("Total bytes  : %12lu\n", TOTAL_SIZE);
     printf(
-        "eOPS per byte: %f\n",
+        "eOPS per byte: %12f\n\n",
         static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE)
     );
 ```
@@ -426,6 +462,60 @@ those specific types using the template defined elsewhere.
     initMatrix<INPUT_ELEMENT>(h_B, ROWS_B * COLS_B);
     OUTPUT_ELEMENT* h_C = (OUTPUT_ELEMENT*)malloc(SIZE_C);
     initMatrix<OUTPUT_ELEMENT>(h_C, ROWS_C * COLS_C);
+```
+
+The tensor cores do fast matrix multiplications, but they only operate on
+inputs and outputs with fixed dimensions (`WMMA_M`, `WMMA_N`, and `WMMA_K`). If
+our input matrices `A` and `B` have dimensions that aren't multiples of the
+corresponding tensor core sizes, then we're going to end up missing the "extra"
+values that sit outside the last tiles. We can't just run for an extra tile to
+get those values because we'd end up reading values from beginnings of the
+*next* rows and exceed the boundaries of the matrices on the last rows.
+Instead, we need to allocate padded versions of the matrices with dimensions
+that *are* a multiple of the tensor core dimensions and fill the unneeded
+values with zeros. Then, after the kernel is done running, we'll need to
+extract the values we want from the output to get the true result.
+
+```cpp
+    INPUT_ELEMENT* h_A_padded = (INPUT_ELEMENT*)malloc(SIZE_A_PADDED);
+    INPUT_ELEMENT* h_B_padded = (INPUT_ELEMENT*)malloc(SIZE_B_PADDED);
+    OUTPUT_ELEMENT* h_C_padded = (OUTPUT_ELEMENT*)malloc(SIZE_C_PADDED);
+```
+
+TODO
+
+```cpp
+    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+    for (int r = 0; r < ROWS_A_PADDED; r++) {
+        for (int c = 0; c < COLS_A_PADDED; c++) {
+            if (r < ROWS_A && c < COLS_A) {
+                h_A_padded[IDX(r, c, COLS_A_PADDED)] = h_A[IDX(r, c, COLS_A)];
+            } else {
+                h_A_padded[IDX(r, c, COLS_A_PADDED)] = static_cast<INPUT_ELEMENT>(0);
+            }
+        }
+    }
+    for (int r = 0; r < ROWS_B_PADDED; r++) {
+        for (int c = 0; c < COLS_B_PADDED; c++) {
+            if (r < ROWS_B && c < COLS_B) {
+                h_B_padded[IDX(r, c, COLS_B_PADDED)] = h_B[IDX(r, c, COLS_B)];
+            } else {
+                h_B_padded[IDX(r, c, COLS_B_PADDED)] = static_cast<INPUT_ELEMENT>(0);
+            }
+        }
+    }
+    for (int r = 0; r < ROWS_C_PADDED; r++) {
+        for (int c = 0; c < COLS_C_PADDED; c++) {
+            if (r < ROWS_C && c < COLS_C) {
+                h_C_padded[IDX(r, c, COLS_C_PADDED)] = h_C[IDX(r, c, COLS_C)];
+            } else {
+                h_C_padded[IDX(r, c, COLS_C_PADDED)] = static_cast<INPUT_ELEMENT>(0);
+            }
+        }
+    }
+    chrono::steady_clock::time_point end = chrono::steady_clock::now();
+    unsigned long pad_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
+    printf("Padding      : %12lu μs\n\n", pad_elapsed);
 ```
 
 If we're going to do CPU verification later, then we need an original copy of
@@ -475,15 +565,15 @@ handling this.
 
 ```cpp
     INPUT_ELEMENT* d_A;
-    cudaMalloc(&d_A, SIZE_A);
+    cudaMalloc(&d_A, SIZE_A_PADDED);
     INPUT_ELEMENT* d_B;
-    cudaMalloc(&d_B, SIZE_B);
+    cudaMalloc(&d_B, SIZE_B_PADDED);
     OUTPUT_ELEMENT* d_C;
-    cudaMalloc(&d_C, SIZE_C);
+    cudaMalloc(&d_C, SIZE_C_PADDED);
 
-    cudaMemcpy(d_A, h_A, SIZE_A, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B, SIZE_B, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_C, h_C, SIZE_C, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_A, h_A_padded, SIZE_A_PADDED, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B_padded, SIZE_B_PADDED, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_C, h_C_padded, SIZE_C_PADDED, cudaMemcpyHostToDevice);
 ```
 
 We're almost ready. If we were to launch the kernel now, we might accidentally
@@ -509,19 +599,19 @@ to block on the kernel's execution because we're trying to measure how long it
 takes to run.
 
 ```cpp
-    chrono::steady_clock::time_point start = chrono::steady_clock::now();
+    start = chrono::steady_clock::now();
     d_gemm<<<NUM_BLOCKS,NUM_THREADS>>>(
         d_A,
         d_B,
         d_C,
-        ROWS_A,
-        INNER_DIM,
-        COLS_B,
+        ROWS_A_PADDED,
+        INNER_DIM_PADDED,
+        COLS_B_PADDED,
         ALPHA,
         BETA
     );
     cudaDeviceSynchronize();
-    chrono::steady_clock::time_point end = chrono::steady_clock::now();
+    end = chrono::steady_clock::now();
 ```
 
 Get the number of microseconds between the start and end of the kernel's
@@ -530,8 +620,23 @@ runtime, and then report some information about its effective speed.
 ```cpp
     long d_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
     double eops = static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(d_elapsed) / 1e6);
-    printf("Device done in %lu microseconds (%f eTOPS)\n", d_elapsed, eops / 1e12);
-    printf("%f%% of theoretical max\n", eops / MAX_OPS * 100.0);
+    printf("Device       : %12lu μs (%11f eTOPS)\n", d_elapsed, eops / 1e12);
+```
+
+TODO
+
+```cpp
+    cudaMemcpy(h_C_padded, d_C, SIZE_C_PADDED, cudaMemcpyDeviceToHost);
+    start = chrono::steady_clock::now();
+    for (int r = 0; r < ROWS_C_PADDED; r++) {
+        for (int c = 0; c < COLS_C_PADDED; c++) {
+            if (r < ROWS_C && c < COLS_C) {
+                h_C[IDX(r, c, COLS_C)] = h_C_padded[IDX(r, c, COLS_C_PADDED)];
+            }
+        }
+    }
+    end = chrono::steady_clock::now();
+    unsigned long extract_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
 ```
 
 ## Checking the Result
@@ -544,14 +649,12 @@ TODO
         printMat<OUTPUT_ELEMENT>(h_C, ROWS_C, COLS_C);
     }
     if (DO_CPU_VERIFY) {
-        cudaMemcpy(h_C, d_C, SIZE_C, cudaMemcpyDeviceToHost);
-
         start = chrono::steady_clock::now();
         h_gemm(h_A, h_B, h_C_orig, ROWS_A, INNER_DIM, COLS_B, ALPHA, BETA);
         end = chrono::steady_clock::now();
-        long h_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
+        unsigned long h_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
         printf(
-            "Host done in %lu microseconds (%f eTOPS)\n",
+            "Host         : %12lu μs (%11f eTOPS)\n\n",
             h_elapsed,
             (static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(h_elapsed) / 1e6)) / 1e12
         );
@@ -560,14 +663,19 @@ TODO
             printMat<OUTPUT_ELEMENT>(h_C_orig, ROWS_C, COLS_C);
         }
         if (verify(h_C_orig, h_C)) {
+            printf("Extraction   : %12lu μs\n\n", extract_elapsed);
             printf("Output correct\n");
+            printf(
+                "Device speedup: %fx\n",
+                static_cast<double>(h_elapsed) / static_cast<double>(d_elapsed)
+            );
         } else {
             printf("===== Output NOT correct =====\n");
         }
-        printf("Device speedup: %fx\n", static_cast<double>(h_elapsed) / static_cast<double>(d_elapsed));
     } else {
         printf("Skipping CPU verification\n");
     }
+    printf("%f%% of theoretical max\n", eops / MAX_OPS * 100.0);
 ```
 
 ## Cleaning Up
@@ -681,8 +789,8 @@ bool verify(OUTPUT_ELEMENT* h_solution, OUTPUT_ELEMENT* h_C) {
                 #elif defined(UINT8_IN_INT32_OUT)
                     "Found output mismatch at (%lu,%lu): device returned %d but solution is %d\n",
                 #endif
-                idx / COLS_OUT,
-                idx % COLS_OUT,
+                idx / COLS_C,
+                idx % COLS_C,
                 h_C[idx],
                 h_solution[idx]
             );
