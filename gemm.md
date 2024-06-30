@@ -275,7 +275,6 @@ __global__ void d_gemm(
 TODO
 
 ```cpp
-    // TODO add support for arbitrary matrix dimensions
     using namespace nvcuda::wmma;
     int warp_row = (blockIdx.x * blockDim.y + threadIdx.y) * WMMA_M;
     int warp_col = (blockIdx.y * blockDim.z + threadIdx.z) * WMMA_N;
@@ -299,7 +298,7 @@ TODO
         fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> B_frag;
         #define IDX_B IDX(i * WMMA_K, warp_col, c_B)
     #endif
-    fragment<accumulator, WMMA_N, WMMA_M, WMMA_K, OUTPUT_ELEMENT> C_frag;
+    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, OUTPUT_ELEMENT> C_frag;
 ```
 
 TODO
@@ -314,7 +313,6 @@ TODO
 TODO
 
 ```cpp
-    // TODO not sure if y_max needs changing here
     for (int i = 0; i < tile_run; i++) {
         load_matrix_sync(A_frag, A + IDX_A, inner);
         load_matrix_sync(B_frag, B + IDX_B, c_B);
@@ -359,12 +357,11 @@ tiles, and we'll get the number of output elements for this configuration. That
 value should always match the number of elements in the actual output array.
 
 ```cpp
-    // TODO fix: doesn't work with non-multiple dimensions
-    /*assert(
+    assert(
         NUM_BLOCKS.x * NUM_THREADS.y * WMMA_N
         * NUM_BLOCKS.y * NUM_THREADS.z * WMMA_M
-        == ROWS_C * COLS_C
-    );*/
+        == ROWS_C_PADDED * COLS_C_PADDED
+    );
 ```
 
 To allocate memory for our three matrices, we need to know their sizes in
@@ -435,7 +432,8 @@ performance or memory bandwidth of the target platform.
 ```cpp
     size_t TOTAL_SIZE = SIZE_A + SIZE_B + SIZE_C;
     printf("Total eOPS   : %12llu\n", TOTAL_NAIVE_OPS);
-    printf("Total bytes  : %12lu\n", TOTAL_SIZE);
+    printf("Input size   : %12lu B\n", SIZE_A + SIZE_B);
+    printf("Output size  : %12lu B\n", SIZE_C);
     printf(
         "eOPS per byte: %12f\n\n",
         static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE)
@@ -487,30 +485,33 @@ TODO
 ```cpp
     chrono::steady_clock::time_point start = chrono::steady_clock::now();
     for (int r = 0; r < ROWS_A_PADDED; r++) {
-        for (int c = 0; c < COLS_A_PADDED; c++) {
-            if (r < ROWS_A && c < COLS_A) {
-                h_A_padded[IDX(r, c, COLS_A_PADDED)] = h_A[IDX(r, c, COLS_A)];
-            } else {
-                h_A_padded[IDX(r, c, COLS_A_PADDED)] = static_cast<INPUT_ELEMENT>(0);
-            }
+        memcpy(
+            h_A_padded + IDX(r, 0, COLS_A_PADDED),
+            h_A + IDX(r, 0, COLS_A),
+            COLS_A * sizeof(INPUT_ELEMENT)
+        );
+        for (int c = COLS_A; c < COLS_A_PADDED; c++) {
+            h_A_padded[IDX(r, c, COLS_A_PADDED)] = static_cast<INPUT_ELEMENT>(0);
         }
     }
     for (int r = 0; r < ROWS_B_PADDED; r++) {
-        for (int c = 0; c < COLS_B_PADDED; c++) {
-            if (r < ROWS_B && c < COLS_B) {
-                h_B_padded[IDX(r, c, COLS_B_PADDED)] = h_B[IDX(r, c, COLS_B)];
-            } else {
-                h_B_padded[IDX(r, c, COLS_B_PADDED)] = static_cast<INPUT_ELEMENT>(0);
-            }
+        memcpy(
+            h_B_padded + IDX(r, 0, COLS_B_PADDED),
+            h_B + IDX(r, 0, COLS_B),
+            COLS_B * sizeof(INPUT_ELEMENT)
+        );
+        for (int c = COLS_B; c < COLS_B_PADDED; c++) {
+            h_B_padded[IDX(r, c, COLS_B_PADDED)] = static_cast<INPUT_ELEMENT>(0);
         }
     }
     for (int r = 0; r < ROWS_C_PADDED; r++) {
-        for (int c = 0; c < COLS_C_PADDED; c++) {
-            if (r < ROWS_C && c < COLS_C) {
-                h_C_padded[IDX(r, c, COLS_C_PADDED)] = h_C[IDX(r, c, COLS_C)];
-            } else {
-                h_C_padded[IDX(r, c, COLS_C_PADDED)] = static_cast<INPUT_ELEMENT>(0);
-            }
+        memcpy(
+            h_C_padded + IDX(r, 0, COLS_C_PADDED),
+            h_C + IDX(r, 0, COLS_C),
+            COLS_C * sizeof(OUTPUT_ELEMENT)
+        );
+        for (int c = COLS_C; c < COLS_C_PADDED; c++) {
+            h_C_padded[IDX(r, c, COLS_C_PADDED)] = static_cast<OUTPUT_ELEMENT>(0);
         }
     }
     chrono::steady_clock::time_point end = chrono::steady_clock::now();
@@ -628,12 +629,12 @@ TODO
 ```cpp
     cudaMemcpy(h_C_padded, d_C, SIZE_C_PADDED, cudaMemcpyDeviceToHost);
     start = chrono::steady_clock::now();
-    for (int r = 0; r < ROWS_C_PADDED; r++) {
-        for (int c = 0; c < COLS_C_PADDED; c++) {
-            if (r < ROWS_C && c < COLS_C) {
-                h_C[IDX(r, c, COLS_C)] = h_C_padded[IDX(r, c, COLS_C_PADDED)];
-            }
-        }
+    for (int r = 0; r < ROWS_C; r++) {
+        memcpy(
+            h_C + IDX(r, 0, COLS_C),
+            h_C_padded + IDX(r, 0, COLS_C_PADDED),
+            COLS_C * sizeof(OUTPUT_ELEMENT)
+        );
     }
     end = chrono::steady_clock::now();
     unsigned long extract_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
