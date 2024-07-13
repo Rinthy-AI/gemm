@@ -81,25 +81,22 @@ using namespace std;
 
 TODO
 
-| Input           | Output   | `#define`            |
-| --------------- | -------- | -------------------- |
-| `__half`        | `__half` | `F16_IN_OUT`         |
-| `__half`        | `float`  | `F16_IN_F32_OUT`     |
-| `unsigned char` | `int`    | `UINT8_IN_INT32_OUT` |
-| `signed char`   | `int`    | `INT8_IN_INT32_OUT`  |
-| `__nv_bfloat16` | `float`  | `BF16_IN_F32_OUT`    |
-| `tf32`          | `float`  | `TF32_IN_F32_OUT`    |
-| `double`        | `double` | `F64_IN_OUT`         |
-| `u4`            | `int`    | `U4_IN_INT32_OUT`    |
-| `s4`            | `int`    | `S4_IN_INT32_OUT`    |
-| `b1`            | `int`    | `B1_IN_INT32_OUT`    |
+| Input           | Output   | `#define`         |
+| --------------- | -------- | ------------------|
+| `__half`        | `float`  | `F16_IN_F32_OUT`  |
+| `__half`        | `__half` | `F16_IN_OUT`      |
+| `unsigned char` | `int`    | `U8_IN_I32_OUT`   |
+| `signed char`   | `int`    | `I8_IN_I32_OUT`   |
+| `__nv_bfloat16` | `float`  | `BF16_IN_F32_OUT` |
+| `tf32`          | `float`  | `TF32_IN_F32_OUT` |
+| `double`        | `double` | `F64_IN_OUT`      |
 
 See [this table][nvidia-in-out-types].
 
 [nvidia-in-out-types]: https://docs.nvidia.com/cuda/cuda-c-programming-guide/#element-types-and-matrix-sizes
 
 ```cpp
-#define UINT8_IN_INT32_OUT
+#define I8_IN_I32_OUT
 ```
 
 TODO
@@ -111,8 +108,6 @@ TODO
 |  8 × 32 ×  16           | `MNK_8x32x16`  |
 | 16 × 16 ×   8           | `MNK_16x16x8`  |
 |  8 ×  8 ×   4           | `MNK_8x8x4`    |
-|  8 ×  8 ×  32           | `MNK_8x8x32`   |
-|  8 ×  8 × 128           | `MNK_8x8x128`  |
 
 Note that not all dimensions are supported for all element types. See link
 above.
@@ -120,38 +115,85 @@ above.
 ```cpp
 #define MNK_16x16x16
 
-#if defined(F64_IN_OUT)
-    #define VERIFY_TOLERANCE 0.005
-    typedef double INPUT_ELEMENT;
-    typedef double OUTPUT_ELEMENT;
-    const double MAX_OPS = 5.3e12/64.0;
-    #ifndef MNK_8x8x4
-        #error "Selected WMMA dimensions are not supported for F64_IN_OUT"
-    #endif
-#elif defined(UINT8_IN_INT32_OUT)
-    #define VERIFY_TOLERANCE 1
-    typedef unsigned char INPUT_ELEMENT;
-    typedef int OUTPUT_ELEMENT;
-    const double MAX_OPS = 275e12;
-    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
-        #error "Selected WMMA dimensions are not supported for UINT8_IN_INT32_OUT"
-    #endif
+#if defined(MNK_16x16x16)
+    const unsigned long WMMA_M =  16;
+    const unsigned long WMMA_N =  16;
+    const unsigned long WMMA_K =  16;
+#elif defined(MNK_32x8x16)
+    const unsigned long WMMA_M =  32;
+    const unsigned long WMMA_N =   8;
+    const unsigned long WMMA_K =  16;
+#elif defined(MNK_8x32x16)
+    const unsigned long WMMA_M =   8;
+    const unsigned long WMMA_N =  32;
+    const unsigned long WMMA_K =  16;
+#elif defined(MNK_16x16x8)
+    const unsigned long WMMA_M =  16;
+    const unsigned long WMMA_N =  16;
+    const unsigned long WMMA_K =   8;
+#elif defined(MNK_8x8x4)
+    const unsigned long WMMA_M =   8;
+    const unsigned long WMMA_N =   8;
+    const unsigned long WMMA_K =   4;
 #else
-    #error "Selected matrix element type is not supported"
+    #error "No MNK setting selected"
 #endif
 ```
 
 TODO
 
 ```cpp
-#if defined(MNK_16x16x16)
-    const unsigned long WMMA_N = 16;
-    const unsigned long WMMA_M = 16;
-    const unsigned long WMMA_K = 16;
-#elif defined(MNK_8x8x4)
-    const unsigned long WMMA_N = 8;
-    const unsigned long WMMA_M = 8;
-    const unsigned long WMMA_K = 4;
+#if defined(F16_IN_F32_OUT)
+    #define VERIFY_TOLERANCE 5
+    typedef half             INPUT_ELEMENT;
+    typedef float            OUTPUT_ELEMENT;
+    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
+        #error "Selected WMMA dimensions are not supported for F16_IN_F32_OUT"
+    #endif
+#elif defined(F16_IN_OUT)
+    #define VERIFY_TOLERANCE 50
+    typedef half             INPUT_ELEMENT;
+    typedef half             OUTPUT_ELEMENT;
+    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
+        #error "Selected WMMA dimensions are not supported for F16_IN_OUT"
+    #endif
+#elif defined(U8_IN_I32_OUT)
+    #define VERIFY_TOLERANCE 0
+    typedef unsigned char    INPUT_ELEMENT;
+    typedef int              OUTPUT_ELEMENT;
+    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
+        #error "Selected WMMA dimensions are not supported for U8_IN_I32_OUT"
+    #endif
+#elif defined(I8_IN_I32_OUT)
+    #define VERIFY_TOLERANCE 0
+    typedef signed char      INPUT_ELEMENT;
+    typedef int              OUTPUT_ELEMENT;
+    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
+        #error "Selected WMMA dimensions are not supported for I8_IN_I32_OUT"
+    #endif
+#elif defined(BF16_IN_F32_OUT)
+    #define VERIFY_TOLERANCE 10
+    typedef nv_bfloat16      INPUT_ELEMENT;
+    typedef float            OUTPUT_ELEMENT;
+    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
+        #error "Selected WMMA dimensions are not supported for BF16_IN_F32_OUT"
+    #endif
+#elif defined(TF32_IN_F32_OUT)
+    #define VERIFY_TOLERANCE 5
+    typedef float            INPUT_ELEMENT;
+    typedef float            OUTPUT_ELEMENT;
+    #if !defined(MNK_16x16x8)
+        #error "Selected WMMA dimensions are not supported for TF32_IN_F32_OUT"
+    #endif
+#elif defined(F64_IN_OUT)
+    #define VERIFY_TOLERANCE 0.005
+    typedef double           INPUT_ELEMENT;
+    typedef double           OUTPUT_ELEMENT;
+    #ifndef MNK_8x8x4
+        #error "Selected WMMA dimensions are not supported for F64_IN_OUT"
+    #endif
+#else
+    #error "No input/output type selected"
 #endif
 ```
 
@@ -165,13 +207,13 @@ TODO
 TODO
 
 ```cpp
-#define IDX(x, y, y_max) x * y_max + y
+#define IDX(x, y, y_max) ((x) * (y_max) + (y))
 ```
 
 TODO
 
 ```cpp
-#define RND_UP_MULT(n, m) (n % m == 0) ? ((n / m) * m) : ((n / m + 1) * m)
+#define RND_UP_MULT(n, m) ((n) % (m) == 0) ? (n) : (((n) / (m) + 1) * (m))
 ```
 
 ## Constants
@@ -181,30 +223,35 @@ TODO
 ```cpp
 const bool          DO_CPU_VERIFY    = false;
 const bool          DEBUG_OUTPUT     = false;
-#if defined(F64_IN_OUT)
-    const INPUT_ELEMENT ALPHA        = 1.234;
-    const INPUT_ELEMENT BETA         = 5.678;
-#elif defined(UINT8_IN_INT32_OUT)
-    const INPUT_ELEMENT ALPHA        = 2;
-    const INPUT_ELEMENT BETA         = 3;
+#if defined(U8_IN_I32_OUT)
+    const INPUT_ELEMENT ALPHA        =      2;
+    const INPUT_ELEMENT BETA         =      3;
+#elif defined(I8_IN_I32_OUT)
+    const INPUT_ELEMENT ALPHA        =     -2;
+    const INPUT_ELEMENT BETA         =      3;
+#else
+    const INPUT_ELEMENT ALPHA        = -1.234;
+    const INPUT_ELEMENT BETA         =  5.678;
 #endif
-const unsigned long ROWS_A           = 4096;
-const unsigned long ROWS_A_PADDED    = RND_UP_MULT(ROWS_A, WMMA_M);
-const unsigned long COLS_A           = 4096;
-const unsigned long COLS_A_PADDED    = RND_UP_MULT(COLS_A, WMMA_K);
+const unsigned long ROWS_A           = 10000;
+const unsigned long COLS_A           = 10000;
+const unsigned long COLS_B           = 10000;
 const unsigned long ROWS_B           = COLS_A;
-const unsigned long ROWS_B_PADDED    = COLS_A_PADDED;
 const unsigned long INNER_DIM        = COLS_A;
-const unsigned long INNER_DIM_PADDED = COLS_A_PADDED;
-const unsigned long COLS_B           = 4096;
-const unsigned long COLS_B_PADDED    = RND_UP_MULT(COLS_B, WMMA_N);
 const unsigned long ROWS_C           = ROWS_A;
-const unsigned long ROWS_C_PADDED    = ROWS_A_PADDED;
 const unsigned long COLS_C           = COLS_B;
+const unsigned long ROWS_A_PADDED    = RND_UP_MULT(ROWS_A, WMMA_M * 4);
+const unsigned long COLS_A_PADDED    = RND_UP_MULT(COLS_A, WMMA_K * 4);
+const unsigned long COLS_B_PADDED    = RND_UP_MULT(COLS_B, WMMA_N * 4);
+const unsigned long ROWS_B_PADDED    = COLS_A_PADDED;
+const unsigned long INNER_DIM_PADDED = COLS_A_PADDED;
+const unsigned long ROWS_C_PADDED    = ROWS_A_PADDED;
 const unsigned long COLS_C_PADDED    = COLS_B_PADDED;
 const unsigned int  WARP_SIZE        = 32;
-const dim3          NUM_BLOCKS         (64,64,1);
 const dim3          NUM_THREADS        (WARP_SIZE,4,4);
+const dim3          NUM_BLOCKS         (ROWS_C_PADDED / (WMMA_M * NUM_THREADS.y),
+                                        COLS_C_PADDED / (WMMA_N * NUM_THREADS.z),
+                                        1);
 ```
 
 TODO
@@ -284,18 +331,23 @@ TODO
 TODO
 
 ```cpp
+    #if defined(TF32_IN_F32_OUT)
+        #define FRAGMENT_TYPE precision::tf32
+    #else
+        #define FRAGMENT_TYPE INPUT_ELEMENT
+    #endif
     #if TRANSPOSE_A
-        fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> A_frag;
+        fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, FRAGMENT_TYPE, col_major> A_frag;
         #define IDX_A IDX(i * WMMA_K, warp_row, inner)
     #else
-        fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> A_frag;
+        fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, FRAGMENT_TYPE, row_major> A_frag;
         #define IDX_A IDX(warp_row, i * WMMA_K, inner)
     #endif
     #if TRANSPOSE_B
-        fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, col_major> B_frag;
+        fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, FRAGMENT_TYPE, col_major> B_frag;
         #define IDX_B IDX(warp_col, i * WMMA_K, c_B)
     #else
-        fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, INPUT_ELEMENT, row_major> B_frag;
+        fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, FRAGMENT_TYPE, row_major> B_frag;
         #define IDX_B IDX(i * WMMA_K, warp_col, c_B)
     #endif
     fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, OUTPUT_ELEMENT> C_frag;
@@ -306,7 +358,13 @@ TODO
 ```cpp
     load_matrix_sync(C_frag, C + IDX(warp_row, warp_col, c_B), c_B, mem_row_major);
     for (int i = 0; i < C_frag.num_elements; i++) {
-        C_frag.x[i] *= beta;
+        #if defined(F16_IN_F32_OUT)
+            C_frag.x[i] *= __half2float(beta);
+        #elif defined(BF16_IN_F32_OUT)
+            C_frag.x[i] *= __bfloat162float(beta);
+        #else
+            C_frag.x[i] *= beta;
+        #endif
     }
 ```
 
@@ -356,23 +414,71 @@ to do is multiply the number of elements per output tile by the number of
 tiles, and we'll get the number of output elements for this configuration. That
 value should always match the number of elements in the actual output array.
 
-```cpp
-    assert(
-        NUM_BLOCKS.x * NUM_THREADS.y * WMMA_N
-        * NUM_BLOCKS.y * NUM_THREADS.z * WMMA_M
-        == ROWS_C_PADDED * COLS_C_PADDED
-    );
-```
-
 To allocate memory for our three matrices, we need to know their sizes in
 bytes. We'll compute those values now by finding the number of elements and
 then multiplying that value by the number of bytes per element. We also print
 the dimensions and sizes of the matrices.
 
 ```cpp
+    #if defined(F16_IN_F32_OUT) || defined(F16_IN_OUT)
+        printf("ALPHA        : %6f\n", __half2float(ALPHA));
+        printf("BETA         : %6f\n\n", __half2float(BETA));
+    #elif defined(BF16_IN_F32_OUT)
+        printf("ALPHA        : %6f\n", __bfloat162float(ALPHA));
+        printf("BETA         : %6f\n\n", __bfloat162float(BETA));
+    #elif defined(U8_IN_I32_OUT) || defined(I8_IN_I32_OUT)
+        printf("ALPHA        : %6d\n", ALPHA);
+        printf("BETA         : %6d\n\n", BETA);
+    #else
+        printf("ALPHA        : %6f\n", ALPHA);
+        printf("BETA         : %6f\n\n", BETA);
+    #endif
+
+    printf("TRANSPOSE_A  : %s\n", TRANSPOSE_A ? "true" : "false");
+    printf("TRANSPOSE_B  : %s\n\n", TRANSPOSE_B ? "true" : "false");
+
+    printf("WMMA_M       : %3lu\n", WMMA_M);
+    printf("WMMA_N       : %3lu\n", WMMA_N);
+    printf("WMMA_K       : %3lu\n\n", WMMA_K);
+
+    printf("NUM_BLOCKS   : (%3d, %3d, %3d) = %5d\n",
+           NUM_BLOCKS.x,
+           NUM_BLOCKS.y,
+           NUM_BLOCKS.z,
+           NUM_BLOCKS.x * NUM_BLOCKS.y * NUM_BLOCKS.z
+    );
+    printf("NUM_THREADS  : (%3d, %3d, %3d) = %5d\n\n",
+           NUM_THREADS.x,
+           NUM_THREADS.y,
+           NUM_THREADS.z,
+           NUM_THREADS.x * NUM_THREADS.y * NUM_THREADS.z
+    );
+
+    #if defined(F16_IN_OUT)
+        printf("Type:        : F16_IN_OUT\n\n");
+    #elif defined(F16_IN_F32_OUT)
+        printf("Type         : F16_IN_F32_OUT\n\n");
+    #elif defined(U8_IN_I32_OUT)
+        printf("Type         : U8_IN_I32_OUT\n\n");
+    #elif defined(I8_IN_I32_OUT)
+        printf("Type         : I8_IN_I32_OUT\n\n");
+    #elif defined(BF16_IN_F32_OUT)
+        printf("Type         : BF16_IN_F32_OUT\n\n");
+    #elif defined(TF32_IN_F32_OUT)
+        printf("Type         : TF32_IN_F32_OUT\n\n");
+    #elif defined(F64_IN_OUT)
+        printf("Type         : F64_IN_OUT\n\n");
+    #elif defined(U4_IN_I32_OUT)
+        printf("Type         : U4_IN_I32_OUT\n\n");
+    #elif defined(S4_IN_I32_OUT)
+        printf("Type         : S4_IN_I32_OUT\n\n");
+    #elif defined(B1_IN_I32_OUT)
+        printf("Type         : B1_IN_I32_OUT\n\n");
+    #endif
+
     size_t SIZE_A = ROWS_A * COLS_A * sizeof(INPUT_ELEMENT);
     printf(
-        "A original   : %5lu × %5lu elements, %lu B => %9lu B\n",
+        "A original   : %5lu × %5lu, %lu B => %9lu B\n",
         ROWS_A,
         COLS_A,
         sizeof(INPUT_ELEMENT),
@@ -380,7 +486,7 @@ the dimensions and sizes of the matrices.
     );
     size_t SIZE_A_PADDED = ROWS_A_PADDED * COLS_A_PADDED * sizeof(INPUT_ELEMENT);
     printf(
-        "    padded   : %5lu × %5lu elements, %lu B => %9lu B\n",
+        "    padded   : %5lu × %5lu, %lu B => %9lu B\n",
         ROWS_A_PADDED,
         COLS_A_PADDED,
         sizeof(INPUT_ELEMENT),
@@ -388,7 +494,7 @@ the dimensions and sizes of the matrices.
     );
     size_t SIZE_B = ROWS_B * COLS_B * sizeof(INPUT_ELEMENT);
     printf(
-        "B original   : %5lu × %5lu elements, %lu B => %9lu B\n",
+        "B original   : %5lu × %5lu, %lu B => %9lu B\n",
         ROWS_B,
         COLS_B,
         sizeof(INPUT_ELEMENT),
@@ -396,7 +502,7 @@ the dimensions and sizes of the matrices.
     );
     size_t SIZE_B_PADDED = ROWS_B_PADDED * COLS_B_PADDED * sizeof(INPUT_ELEMENT);
     printf(
-        "    padded   : %5lu × %5lu elements, %lu B => %9lu B\n",
+        "    padded   : %5lu × %5lu, %lu B => %9lu B\n",
         ROWS_B_PADDED,
         COLS_B_PADDED,
         sizeof(INPUT_ELEMENT),
@@ -404,7 +510,7 @@ the dimensions and sizes of the matrices.
     );
     size_t SIZE_C = ROWS_C * COLS_C * sizeof(OUTPUT_ELEMENT);
     printf(
-        "C original   : %5lu × %5lu elements, %lu B => %9lu B\n",
+        "C original   : %5lu × %5lu, %lu B => %9lu B\n",
         ROWS_C,
         COLS_C,
         sizeof(OUTPUT_ELEMENT),
@@ -412,7 +518,7 @@ the dimensions and sizes of the matrices.
     );
     size_t SIZE_C_PADDED = ROWS_C_PADDED * COLS_C_PADDED * sizeof(OUTPUT_ELEMENT);
     printf(
-        "    padded   : %5lu × %5lu elements, %lu B => %9lu B\n\n",
+        "    padded   : %5lu × %5lu, %lu B => %9lu B\n\n",
         ROWS_C_PADDED,
         COLS_C_PADDED,
         sizeof(OUTPUT_ELEMENT),
@@ -431,12 +537,17 @@ performance or memory bandwidth of the target platform.
 
 ```cpp
     size_t TOTAL_SIZE = SIZE_A + SIZE_B + SIZE_C;
-    printf("Total eOPS   : %12llu\n", TOTAL_NAIVE_OPS);
-    printf("Input size   : %12lu B\n", SIZE_A + SIZE_B);
-    printf("Output size  : %12lu B\n", SIZE_C);
+    printf("Total eOPS   : %13llu\n", TOTAL_NAIVE_OPS);
+    printf("Input size   : %13lu B\n", SIZE_A + SIZE_B);
+    printf("Output size  : %13lu B\n", SIZE_C);
     printf(
-        "eOPS per byte: %12f\n\n",
+        "eOPS per byte: %13f\n\n",
         static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE)
+    );
+    assert(
+        NUM_BLOCKS.x * NUM_THREADS.y * WMMA_N
+        * NUM_BLOCKS.y * NUM_THREADS.z * WMMA_M
+        == ROWS_C_PADDED * COLS_C_PADDED
     );
 ```
 
@@ -484,7 +595,7 @@ TODO
 
 ```cpp
     chrono::steady_clock::time_point start = chrono::steady_clock::now();
-    for (int r = 0; r < ROWS_A_PADDED; r++) {
+    for (int r = 0; r < ROWS_A; r++) {
         memcpy(
             h_A_padded + IDX(r, 0, COLS_A_PADDED),
             h_A + IDX(r, 0, COLS_A),
@@ -493,6 +604,16 @@ TODO
         for (int c = COLS_A; c < COLS_A_PADDED; c++) {
             h_A_padded[IDX(r, c, COLS_A_PADDED)] = static_cast<INPUT_ELEMENT>(0);
         }
+    }
+    for (int c = 0; c < COLS_A_PADDED; c++) {
+        h_A_padded[IDX(ROWS_A, c, COLS_A_PADDED)] = 0;
+    }
+    for (int r = ROWS_A + 1; r < ROWS_A_PADDED; r++) {
+        memcpy(
+            h_A_padded + IDX(r, 0, COLS_A_PADDED),
+            h_A_padded + IDX(ROWS_A, 0, COLS_A_PADDED),
+            COLS_A_PADDED * sizeof(INPUT_ELEMENT)
+        );
     }
     for (int r = 0; r < ROWS_B_PADDED; r++) {
         memcpy(
@@ -504,6 +625,16 @@ TODO
             h_B_padded[IDX(r, c, COLS_B_PADDED)] = static_cast<INPUT_ELEMENT>(0);
         }
     }
+    for (int c = 0; c < COLS_B_PADDED; c++) {
+        h_B_padded[IDX(ROWS_B, c, COLS_B_PADDED)] = 0;
+    }
+    for (int r = ROWS_B + 1; r < ROWS_B_PADDED; r++) {
+        memcpy(
+            h_B_padded + IDX(r, 0, COLS_B_PADDED),
+            h_B_padded + IDX(ROWS_B, 0, COLS_B_PADDED),
+            COLS_B_PADDED * sizeof(INPUT_ELEMENT)
+        );
+    }
     for (int r = 0; r < ROWS_C_PADDED; r++) {
         memcpy(
             h_C_padded + IDX(r, 0, COLS_C_PADDED),
@@ -514,9 +645,19 @@ TODO
             h_C_padded[IDX(r, c, COLS_C_PADDED)] = static_cast<OUTPUT_ELEMENT>(0);
         }
     }
+    for (int c = 0; c < COLS_C_PADDED; c++) {
+        h_C_padded[IDX(ROWS_C, c, COLS_C_PADDED)] = 0;
+    }
+    for (int r = ROWS_C + 1; r < ROWS_C_PADDED; r++) {
+        memcpy(
+            h_C_padded + IDX(r, 0, COLS_C_PADDED),
+            h_C_padded + IDX(ROWS_C, 0, COLS_C_PADDED),
+            COLS_C_PADDED * sizeof(INPUT_ELEMENT)
+        );
+    }
     chrono::steady_clock::time_point end = chrono::steady_clock::now();
     unsigned long pad_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
-    printf("Padding      : %12lu μs\n\n", pad_elapsed);
+    printf("Padding      : %13lu μs\n\n", pad_elapsed);
 ```
 
 If we're going to do CPU verification later, then we need an original copy of
@@ -540,15 +681,6 @@ easily copied into a Python REPL.
 
 ```cpp
     if (DEBUG_OUTPUT) {
-        #if defined(FP64_IN_OUT)
-            printf("ALPHA = %f\n", ALPHA);
-            printf("BETA = %f\n", BETA);
-        #elif defined(UINT8_IN_INT32_OUT)
-            printf("ALPHA = %d\n", ALPHA);
-            printf("BETA = %d\n", BETA);
-        #endif
-        printf("TRANSPOSE_A = %s\n", TRANSPOSE_A ? "true" : "false");
-        printf("TRANSPOSE_B = %s\n", TRANSPOSE_B ? "true" : "false");
         printf("A = ");
         printMat<INPUT_ELEMENT>(h_A, ROWS_A, COLS_A);
         printf("B = ");
@@ -621,7 +753,7 @@ runtime, and then report some information about its effective speed.
 ```cpp
     long d_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
     double eops = static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(d_elapsed) / 1e6);
-    printf("Device       : %12lu μs (%11f eTOPS)\n", d_elapsed, eops / 1e12);
+    printf("Device       : %13lu μs (%11f eTOPS)\n", d_elapsed, eops / 1e12);
 ```
 
 TODO
@@ -655,7 +787,7 @@ TODO
         end = chrono::steady_clock::now();
         unsigned long h_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
         printf(
-            "Host         : %12lu μs (%11f eTOPS)\n\n",
+            "Host         : %13lu μs (%11f eTOPS)\n\n",
             h_elapsed,
             (static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(h_elapsed) / 1e6)) / 1e12
         );
@@ -664,19 +796,14 @@ TODO
             printMat<OUTPUT_ELEMENT>(h_C_orig, ROWS_C, COLS_C);
         }
         if (verify(h_C_orig, h_C)) {
-            printf("Extraction   : %12lu μs\n\n", extract_elapsed);
+            printf("Extraction   : %13lu μs\n\n", extract_elapsed);
             printf("Output correct\n");
-            printf(
-                "Device speedup: %fx\n",
-                static_cast<double>(h_elapsed) / static_cast<double>(d_elapsed)
-            );
         } else {
             printf("===== Output NOT correct =====\n");
         }
     } else {
-        printf("Skipping CPU verification\n");
+        printf("Host         :       skipped\n");
     }
-    printf("%f%% of theoretical max\n", eops / MAX_OPS * 100.0);
 ```
 
 ## Cleaning Up
@@ -745,7 +872,13 @@ matrices, this takes a long time.
     INPUT_ELEMENT a, b;
     for (int row = 0; row < r_A; row++) {
         for (int col = 0; col < c_B; col++) {
-            C[IDX(row, col, c_B)] *= beta;
+            #if defined(F16_IN_F32_OUT)
+                C[IDX(row, col, c_B)] *= __half2float(beta);
+            #elif defined(BF16_IN_F32_OUT)
+                C[IDX(row, col, c_B)] *= __bfloat162float(beta);
+            #else
+                C[IDX(row, col, c_B)] *= beta;
+            #endif
             for (int offset = 0; offset < inner; offset++) {
                 #if TRANSPOSE_A
                     a = A[IDX(offset, row, inner)];
@@ -757,7 +890,13 @@ matrices, this takes a long time.
                 #else
                     b = B[IDX(offset, col, c_B)];
                 #endif
-                C[IDX(row, col, c_B)] += alpha * a * b;
+                #if defined(F16_IN_F32_OUT)
+                    C[IDX(row, col, c_B)] += __half2float(alpha * a * b);
+                #elif defined(BF16_IN_F32_OUT)
+                    C[IDX(row, col, c_B)] += __bfloat162float(alpha * a * b);
+                #else
+                    C[IDX(row, col, c_B)] += alpha * a * b;
+                #endif
             }
         }
     }
@@ -783,17 +922,29 @@ specifiers][conv-spec].
 ```cpp
 bool verify(OUTPUT_ELEMENT* h_solution, OUTPUT_ELEMENT* h_C) {
     for (int idx = 0; idx < ROWS_C * COLS_C; idx++) {
-        if (abs(h_C[idx] - h_solution[idx]) > VERIFY_TOLERANCE) {
+        #if defined(F16_IN_OUT)
+            if (__hgt(__habs(h_C[idx] - h_solution[idx]), VERIFY_TOLERANCE)) {
+        #else
+            if (abs(h_C[idx] - h_solution[idx]) > VERIFY_TOLERANCE) {
+        #endif
             printf(
-                #if defined(F64_IN_OUT)
-                    "Found output mismatch at (%lu,%lu): device returned %f but solution is %f\n",
-                #elif defined(UINT8_IN_INT32_OUT)
+                #if defined(U8_IN_I32_OUT) || defined(I8_IN_I32_OUT)
                     "Found output mismatch at (%lu,%lu): device returned %d but solution is %d\n",
+                #else
+                    "Found output mismatch at (%lu,%lu): device returned %f but solution is %f\n",
                 #endif
                 idx / COLS_C,
                 idx % COLS_C,
-                h_C[idx],
-                h_solution[idx]
+                #if defined(F16_IN_OUT)
+                    __half2float(h_C[idx]),
+                    __half2float(h_solution[idx])
+                #elif defined(BF16_IN_F32_OUT)
+                    __bfloat162float(h_C[idx]),
+                    __bfloat162float(h_solution[idx])
+                #else
+                    h_C[idx],
+                    h_solution[idx]
+                #endif
             );
             return false;
         }
@@ -845,7 +996,7 @@ void printMat(ELEMENT* mat, int rows, int cols) {
         for (int c = 0; c < cols; c++) {
             #if defined(F64_IN_OUT)
                 printf("%f,", mat[r * rows + c]);
-            #elif defined(UINT8_IN_INT32_OUT)
+            #elif defined(U8_IN_I32_OUT)
                 printf("%d,", mat[r * rows + c]);
             #endif
         }
