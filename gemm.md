@@ -7,10 +7,16 @@ publish: false
 ---
 
 **TL;DR:** I wrote a C++ program that demonstrates a general matrix multiply
-(GEMM) implementation for the Jetson AGX Orin devkit. The `gemm` program uses
-the tensor cores available on that platform and allows for arbitrary use of the
-supported input and output types. There are no external software dependencies
-aside from CUDA.
+(GEMM) implementation for the [Jetson AGX Orin devkit][devkit]. The `gemm`
+program uses the [tensor cores][tensor-cores] available on that platform and
+allows for arbitrary use of the supported input and output types (except
+[sub-byte types][sub-byte]). There are no external software dependencies aside
+from CUDA.  The performance is nowhere near cuBLAS, but the code may be useful
+as a reference.
+
+[devkit]: https://developer.nvidia.com/embedded/jetson-developer-kits
+[tensor-cores]: https://www.nvidia.com/en-us/data-center/tensor-cores/
+[sub-byte]: https://docs.nvidia.com/cuda/cuda-c-programming-guide/#sub-byte-operations
 
 # Purpose and Structure
 
@@ -18,21 +24,22 @@ This post is a **literate program**. That means that this file contains a
 complete program within it, in addition to explanatory natural language
 throughout. All you need to do to get the source code is extract the lines in
 all the code blocks and concatenate them. To run the code, clone [the
-repo][github] and run `make`. You need `nvcc` and CUDA. The compiled binary
-will be in the repo root and is called `gemm`. To play with other input and
-output types, matrix dimensions, transposition, and other parameters, change
-the `#define`s and constants in the code according to the descriptions below.
+repo][github] and run `make`. You need `nvcc`, CUDA, and Python. The compiled
+binary will be in the repo root and is called `gemm`. To play with other input
+and output types, matrix dimensions, transposition, and other parameters,
+change the `#define`s and constants in the code according to the descriptions
+below.
 
 [github]: https://github.com/Rinthy-AI/gemm
 
 I wrote this code as a part of Rinthy AI, which is a trio of friends interested
 in playing with machine learning tech on our own hardware. We split the cost of
 a Jetson AGX Orin development kit, and this program is meant to run exclusively
-on that platform---although it may run on others with little or no
-modification. The program runs a single general matrix multiply (GEMM)
-operation with user-specified dimensions and other parameters. It works as an
-example of how to interact with the tensor cores on the the devkit's platform
-at a lower level than typical libraries.
+on that platform—although it may run on others with little or no modification.
+The program runs a single general matrix multiply (GEMM) operation with
+user-specified dimensions and other parameters. It works as an example of how
+to interact with the tensor cores on the the devkit's platform at a lower level
+than typical libraries.
 
 # Setup
 
@@ -57,13 +64,20 @@ $\beta\mathbf{C}$ first and then accumulate the results of
 $\alpha\mathbf{A}\mathbf{B}$ into $\mathbf{C}$ second.
 
 I chose GEMM as the goal for this program because of its usefulness in machine
-learning. A fast GEMM implementation---or at least one that teaches me
-about the hardware and programming models---has value for any future work we
-might do in this area.
+learning. Understanding some CUDA and how GEMM works with the tensor cores has
+value for any future work we might do in this area.
 
 ## Includes
 
-TODO
+The first thing we have to do is pull in some dependencies. `cassert`,
+`chrono`, `iostream`, and `stdlib.h` are all for basic I/O, timing, and other
+stuff related to the test harness rather than the kernel itself. We need
+`cuda.h` for any CUDA stuff to work at all, and we also need `cuda_bf16.h` so
+we can use the [`bfloat16`][bf16] type, which is a variant of half-precision
+floating point. `mma.h` contains everything we need to interact with the tensor
+cores and stands for "matrix multiply accumulate".
+
+[bf16]: https://cloud.google.com/blog/products/ai-machine-learning/bfloat16-the-secret-to-high-performance-on-cloud-tpus
 
 ```cpp
 #include <cassert>
@@ -79,27 +93,53 @@ using namespace std;
 
 ## Defines
 
-TODO
+Here we define our inputs and outputs. The tensor cores [are
+modelled][tc-model] as special coprocessing units that perform the operations
+$\mathbf{D} = \mathbf{A}\mathbf{B} + \mathbf{C}$ or $\mathbf{C} =
+\mathbf{A}\mathbf{B} + \mathbf{C}$. The tensor cores only support a fixed set
+of input and output types, where $\mathbf{A}$ and $\mathbf{B}$ are considered
+inputs and $\mathbf{C}$ and $\mathbf{D}$ are outputs. To choose a particular
+input/output type pair, we `#define` a corresponding identifier. The supported
+type pairs and their corresponding identifiers are listed in the table
+below,[^sub-byte-support] which I have copied from [here][types-table].
+
+[tc-model]: https://docs.nvidia.com/cuda/cuda-c-programming-guide/#warp-matrix-functions
+[types-table]: https://docs.nvidia.com/cuda/cuda-c-programming-guide/#element-types-and-matrix-sizes
+
+[^sub-byte-support]: The tensor cores support additional type pairs where the
+inputs are less than one byte wide. They are supported on an experimental basis
+and aren't that interesting to me, so I didn't implement them here. Some
+interesting extra operations are also supported for these types.
 
 | Input           | Output   | `#define`         |
 | --------------- | -------- | ------------------|
-| `__half`        | `float`  | `F16_IN_F32_OUT`  |
-| `__half`        | `__half` | `F16_IN_OUT`      |
+| `half`          | `float`  | `F16_IN_F32_OUT`  |
+| `half`          | `half`   | `F16_IN_OUT`      |
 | `unsigned char` | `int`    | `U8_IN_I32_OUT`   |
 | `signed char`   | `int`    | `I8_IN_I32_OUT`   |
-| `__nv_bfloat16` | `float`  | `BF16_IN_F32_OUT` |
+| `nv_bfloat16`   | `float`  | `BF16_IN_F32_OUT` |
 | `tf32`          | `float`  | `TF32_IN_F32_OUT` |
 | `double`        | `double` | `F64_IN_OUT`      |
 
-See [this table][nvidia-in-out-types].
-
-[nvidia-in-out-types]: https://docs.nvidia.com/cuda/cuda-c-programming-guide/#element-types-and-matrix-sizes
+Below we select the type pair that takes signed 8-bit integers as input and
+accumulates into signed 32-bit integers on the output. You can select a
+different type pair by replacing the `#define`.
 
 ```cpp
 #define I8_IN_I32_OUT
 ```
 
-TODO
+Each type pair also supports a fixed set of matrix dimensions. In the kernel,
+it will be up to us to load these "tiles" in the correct order by indexing into
+the given arrays.[^tiling] The supported tile dimensions are listed in the
+table linked above, and their mapping to `#define`s is shown in the table
+below.
+
+[^tiling]: If you're already familiar with [matmul tiling][tiling-howto], the
+tensor cores allow you to do the same thing but *faster*. In other words, using
+the tensor cores is more or less like getting a tiled matmul for free.
+
+[tiling-howto]: https://penny-xu.github.io/blog/tiled-matrix-multiplication
 
 | WMMA Dimensions (m-n-k) | `#define`      |
 |-------------------------|----------------|
@@ -109,16 +149,31 @@ TODO
 | 16 × 16 ×   8           | `MNK_16x16x8`  |
 |  8 ×  8 ×   4           | `MNK_8x8x4`    |
 
-Note that not all dimensions are supported for all element types. See link
-above.
+In general, types that are smaller in memory allow for larger tiles. By
+default, we select square tiles of 256 elements. Note that in the `MNK`
+notation as given by Nvidia, the $\mathbf{A}$ tile has dimensions $M \times K$,
+the $\mathbf{B}$ tile has dimensions $K \times N$, and the $\mathbf{C}$ tile
+has dimensions $M \times N$.
 
 ```cpp
 #define MNK_16x16x16
+```
 
+We'll need the `MNK` values as individual constants later, so we'll use
+preprocessor logic to define them now. For brevity, I've hidden most of the
+logic.
+
+```cpp
 #if defined(MNK_16x16x16)
     const unsigned long WMMA_M =  16;
     const unsigned long WMMA_N =  16;
     const unsigned long WMMA_K =  16;
+```
+
+<details>
+<summary>Click to show/hide `MNK` constant logic</summary>
+
+```cpp
 #elif defined(MNK_32x8x16)
     const unsigned long WMMA_M =  32;
     const unsigned long WMMA_N =   8;
@@ -140,10 +195,38 @@ above.
 #endif
 ```
 
-TODO
+</details>
+
+Now we define the actual input and output types for our selected type pair
+using `typedef`. In all future code, we'll use `INPUT_ELEMENT` and
+`OUTPUT_ELEMENT` to refer to the generic types defined here. Later we'll also
+optionally check whether or not the kernel gave the correct answer, but we need
+to allow some tolerance in certain cases due to floating-point rounding error.
+`VERIFY_TOLERANCE` will be the maximum allowable difference between the
+accepted answer for any output element and the computed result. For our
+selected type pair, we're only dealing with integers, so the answer should be
+exact.
+
+Also, it's possible to `#define` a type pair and `MNK` setting that aren't
+supported together, so we check for that using the data from the linked table.
+I've pulled out the case for our chosen type pair and hidden the rest, since
+they're not that interesting.
 
 ```cpp
-#if defined(F16_IN_F32_OUT)
+#if defined(I8_IN_I32_OUT)
+    #define VERIFY_TOLERANCE 0
+    typedef signed char      INPUT_ELEMENT;
+    typedef int              OUTPUT_ELEMENT;
+    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
+        #error "Selected WMMA dimensions are not supported for I8_IN_I32_OUT"
+    #endif
+```
+
+<details>
+<summary>Click to show/hide other type definitions and tile dimensions checks</summary>
+
+```cpp
+#elif defined(F16_IN_F32_OUT)
     #define VERIFY_TOLERANCE 5
     typedef half             INPUT_ELEMENT;
     typedef float            OUTPUT_ELEMENT;
@@ -163,13 +246,6 @@ TODO
     typedef int              OUTPUT_ELEMENT;
     #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
         #error "Selected WMMA dimensions are not supported for U8_IN_I32_OUT"
-    #endif
-#elif defined(I8_IN_I32_OUT)
-    #define VERIFY_TOLERANCE 0
-    typedef signed char      INPUT_ELEMENT;
-    typedef int              OUTPUT_ELEMENT;
-    #if !defined(MNK_16x16x16) && !defined(MNK_32x8x16) && !defined(MNK_8x32x16)
-        #error "Selected WMMA dimensions are not supported for I8_IN_I32_OUT"
     #endif
 #elif defined(BF16_IN_F32_OUT)
     #define VERIFY_TOLERANCE 10
@@ -197,20 +273,51 @@ TODO
 #endif
 ```
 
-TODO
+</details>
+
+The definition of GEMM allows the user to transpose $\mathbf{A}$ and/or
+$\mathbf{B}$. These `#define`s encode that information. I originally made these
+runtime constants, but the code to make it work was hard to follow. It made
+more sense to make them compile-time options instead. In an actual application,
+this approach might be reasonable because the particular layout of matmuls for
+a given model or workload might be known at compile time.
 
 ```cpp
 #define TRANSPOSE_A false
 #define TRANSPOSE_B false
 ```
 
-TODO
+All matrices in this program are stored as contiguous arrays in row-major
+order. This means that the dimension information is stored separately from the
+data itself, and it's on us to index into the array properly. For convenience,
+let's `#define` a macro that takes our desired 2D indices and does the indexing
+math for us. This makes the code easier to read. We also have to pass `y_max`,
+which is the number of elements to skip forward in order to increment `y` by 1.
+For row-major matrices, `y_max` is equal to the number of columns in the
+matrix. However, as we'll see later, we can play with the inputs to this macro
+to get efficient in-place transposition.
+
+Note that everything is over-parenthesized because this is a macro, and the
+arguments are *expressions*, not values. If `x` is something like `idx /
+NUM_ROWS`, then without parentheses the order of operations might not play out
+how we'd expect. (This bit me during development.) To ensure that the arguments
+are evaluated first, we wrap them up in parens.
 
 ```cpp
 #define IDX(x, y, y_max) ((x) * (y_max) + (y))
 ```
 
-TODO
+The tensor cores operate on fixed tile sizes. That presents an issue when our
+input matrices have dimensions that aren't a multiple of the tile dimensions.
+This is a variant of the [tile quantization][tile-quant] problem. We'll solve
+it later by padding the inputs with zeros up to the nearest multiples in each
+dimension. This macro does that rounding up operation for us. Given some input
+`n` and desired factor `m`, this macro checks whether `n` is divisble by `m`.
+If it is, then there's nothing to do, so we resolve to `n`. Otherwise, we use
+integer division to get the next *lowest* multiple of `m`, add 1, and then
+multiply back up by `m`. As above, we parenthesize everything.
+
+[tile-quant]: https://docs.nvidia.com/deeplearning/performance/dl-performance-matrix-multiplication/index.html#tile-quant
 
 ```cpp
 #define RND_UP_MULT(n, m) ((n) % (m) == 0) ? (n) : (((n) / (m) + 1) * (m))
@@ -218,11 +325,35 @@ TODO
 
 ## Constants
 
-TODO
+This is the control panel of the program. Aside from the `#define`s above,
+these constants encode everything about the inputs to the GEMM operation. Our
+kernel will take some of these values as arguments in order to properly
+separate it from the rest of the program, but for this purpose it makes sense
+to set the values statically.
+
+`DO_CPU_VERIFY` enables a correctness check. In the appendix you'll find a
+simple (and slow) CPU implementation of the GEMM operation. When this constant
+is `true`, we feed the original inputs to this checking function and compare
+its results to the kernel. On the Jetson devkit, square matrices with dimension
+1000 take about one second to evaluate on the CPU, so beyond that I turn it
+off.
+
+`DEBUG_OUTPUT` causes the program to print the contents of the input and output
+matrices. This is useful for debugging but only makes sense for small matrices.
 
 ```cpp
 const bool          DO_CPU_VERIFY    = false;
 const bool          DEBUG_OUTPUT     = false;
+```
+
+Here we'll define the values of $\alpha$ and $\beta$. Different type pairs need
+different literals, so we use preprocessor logic to make that happen. Note that
+the base case covers all floating point type pairs, but for those types with
+low precision, the given literals are usually not representable. The compiler
+seems to gracefully handle this by adjusting the actual values to the nearest
+representable one.
+
+```cpp
 #if defined(U8_IN_I32_OUT)
     const INPUT_ELEMENT ALPHA        =      2;
     const INPUT_ELEMENT BETA         =      3;
@@ -233,6 +364,17 @@ const bool          DEBUG_OUTPUT     = false;
     const INPUT_ELEMENT ALPHA        = -1.234;
     const INPUT_ELEMENT BETA         =  5.678;
 #endif
+```
+
+Now we define the sizes of the matrices. Note that matrix multiplication is
+undefined when the number of columns in the left matrix is not equal to the
+number of rows in the right matrix. This means that we can only really change
+*three* parameters here: the rows of $\mathbf{A}$, the columns of $\mathbf{B}$,
+and the shared "inner" dimension. Also, the dimensions of $\mathbf{C}$ are
+implied by these values, too. We encode all of these constraints by assigning
+subsequent constants based on the earlier three literals.
+
+```cpp
 const unsigned long ROWS_A           = 10000;
 const unsigned long COLS_A           = 10000;
 const unsigned long COLS_B           = 10000;
@@ -240,6 +382,16 @@ const unsigned long ROWS_B           = COLS_A;
 const unsigned long INNER_DIM        = COLS_A;
 const unsigned long ROWS_C           = ROWS_A;
 const unsigned long COLS_C           = COLS_B;
+```
+
+Given the dimensions of the matrices, we need to compute the padded dimensions
+as well. This is to satisfy the quantization problem discussed above. We use
+the `RND_UP_MULT` macro to make this easier. The desired multiples are four
+times the corresponding `MNK` values. The factor of four is necessary
+because—as we'll see below—every thread block is responsible for a square of 16
+tiles in the output.
+
+```cpp
 const unsigned long ROWS_A_PADDED    = RND_UP_MULT(ROWS_A, WMMA_M * 4);
 const unsigned long COLS_A_PADDED    = RND_UP_MULT(COLS_A, WMMA_K * 4);
 const unsigned long COLS_B_PADDED    = RND_UP_MULT(COLS_B, WMMA_N * 4);
@@ -247,6 +399,36 @@ const unsigned long ROWS_B_PADDED    = COLS_A_PADDED;
 const unsigned long INNER_DIM_PADDED = COLS_A_PADDED;
 const unsigned long ROWS_C_PADDED    = ROWS_A_PADDED;
 const unsigned long COLS_C_PADDED    = COLS_B_PADDED;
+```
+
+Every kernel must define its block and grid dimensions. First, it's important
+to understand that the tensor cores operate at the warp level. That is, all 32
+threads in a warp must collaborate to execute any of the functions in the
+`wmma` namespace. An easy way to keep track of that is to make the `x`
+dimension of the block size equal to the warp size. Thread IDs count along the
+`x` dimension first, so this all works out nicely.
+
+Here's an area where I'm slightly confused. At first, I set the `y` and `z`
+dimensions of the block size to 1, since that seemed like a reasonable guess.
+When I ran the program through the profiler, it complained about low occupancy.
+I don't fully understand occupancy, but it seems like it's more or less a
+measure of how well the blocks fit in the streaming multiprocessors (SMs). If
+occupancy is low, then the kernel isn't using all of the SM's resources. I
+think of this kind of like packing a car. If your bags and boxes are too big,
+then you can't fill up all the available volume, but if they're small then you
+can pack more efficiently by fitting them together.
+
+Anyway, I played with the `y` and `z` dimensions for a while to increase the
+occupancy, and I landed on 4. It's almost completely arbitrary and probably not
+optimal, but it works alright. The net results are that occupancy is increased,
+which *generally* increases speed, and each block is now responsible for 16
+outputs instead of just one.
+
+We also have to set up the grid dimensions, which need to work out so that
+there are exactly enough blocks to cover the entire output. This is one of many
+cases in this kind of programming where careful arithmetic is essential.
+
+```cpp
 const unsigned int  WARP_SIZE        = 32;
 const dim3          NUM_THREADS        (WARP_SIZE,4,4);
 const dim3          NUM_BLOCKS         (ROWS_C_PADDED / (WMMA_M * NUM_THREADS.y),
@@ -254,15 +436,30 @@ const dim3          NUM_BLOCKS         (ROWS_C_PADDED / (WMMA_M * NUM_THREADS.y)
                                         1);
 ```
 
-TODO
+When we run the kernel and measure its execution time, we'll want to estimate
+how many operations it ran per second. To do that, we need a credible estimate
+for the numerator—the number of operations. We're going to conflate
+multiplication and addition operations here just to keep things simple, and
+we're ignoring the existence of fused multiply-add instructions, too. With
+those simplifications, we come to the expression below. First, we have to
+multiply every element of $\mathbf{A}$ by a scalar, so that's $M \times K$
+operations. For every element in $\mathbf{C}$, we know that we have to multiply
+$K$ pairs of elements. We also have to add them all together, which adds
+another $K - 1$ operations. The scalar multiplication by $\beta$ and the final
+summation each add another $M \times N$ operations, giving a total of
 
-I use the term eTOPS in this file to refer to "effective TOPS", which means
-"how fast would you have to do arithmetic operations on the given types with
-the naive gemm algorithm to match the observed speed"
+$$MK + (K + K - 1)MN + 2MN$$
+
+I call this value the total number of "effective operations" or "eOPS". The "e"
+is there to remind the reader that this value isn't really a perfect
+representation of what the kernel is actually doing. It's more like a measure
+of how many operations you would have to do if you were doing GEMM the naive
+way, such as in the CPU verification routine.
 
 ```cpp
-const unsigned long long TOTAL_NAIVE_OPS = (2 * INNER_DIM - 1) * (ROWS_C * COLS_C)
-                                         + (ROWS_C * COLS_C) * 3;
+const unsigned long long TOTAL_EOPS = (ROWS_A * INNER_DIM)
+                                      + (INNER_DIM + INNER_DIM - 1) * (ROWS_C * COLS_C)
+                                      + 2 * (ROWS_C * COLS_C);
 ```
 
 ## Forward Declarations
@@ -537,12 +734,12 @@ performance or memory bandwidth of the target platform.
 
 ```cpp
     size_t TOTAL_SIZE = SIZE_A + SIZE_B + SIZE_C;
-    printf("Total eOPS   : %13llu\n", TOTAL_NAIVE_OPS);
+    printf("Total eOPS   : %13llu\n", TOTAL_EOPS);
     printf("Input size   : %13lu B\n", SIZE_A + SIZE_B);
     printf("Output size  : %13lu B\n", SIZE_C);
     printf(
         "eOPS per byte: %13f\n\n",
-        static_cast<double>(TOTAL_NAIVE_OPS) / static_cast<double>(TOTAL_SIZE)
+        static_cast<double>(TOTAL_EOPS) / static_cast<double>(TOTAL_SIZE)
     );
     assert(
         NUM_BLOCKS.x * NUM_THREADS.y * WMMA_N
@@ -675,8 +872,8 @@ opinion, so we just do it every time.
 
 If `DEBUG_OUTPUT` is `true`, then we'll print whether `A` and `B` will be
 transposed during the operation, as well as the initial contents of `A`, `B`,
-and `C`. The `printMat` function is generic over the element type---just like
-`initMatrix` above---and prints the matrix elements in a format that can be
+and `C`. The `printMat` function is generic over the element type—just like
+`initMatrix` above—and prints the matrix elements in a format that can be
 easily copied into a Python REPL.
 
 ```cpp
@@ -726,8 +923,8 @@ by initializing the device explicitly now.
 We're finally done setting up. We can launch the kernel and measure the time it
 takes to execute. The call to `cudaDeviceSynchronize` guarantees that the GPU
 will finish its most recent kernel before advancing to the next line. Normally,
-CPU execution continues after a kernel launch---which is the point of having a
-GPU at all---and that's usually the desired behavior. In this case, we *want*
+CPU execution continues after a kernel launch—which is the point of having a
+GPU at all—and that's usually the desired behavior. In this case, we *want*
 to block on the kernel's execution because we're trying to measure how long it
 takes to run.
 
@@ -752,7 +949,7 @@ runtime, and then report some information about its effective speed.
 
 ```cpp
     long d_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
-    double eops = static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(d_elapsed) / 1e6);
+    double eops = static_cast<double>(TOTAL_EOPS) / (static_cast<double>(d_elapsed) / 1e6);
     printf("Device       : %13lu μs (%11f eTOPS)\n", d_elapsed, eops / 1e12);
 ```
 
@@ -789,7 +986,7 @@ TODO
         printf(
             "Host         : %13lu μs (%11f eTOPS)\n\n",
             h_elapsed,
-            (static_cast<double>(TOTAL_NAIVE_OPS) / (static_cast<double>(h_elapsed) / 1e6)) / 1e12
+            (static_cast<double>(TOTAL_EOPS) / (static_cast<double>(h_elapsed) / 1e6)) / 1e12
         );
         if (DEBUG_OUTPUT) {
             printf("CPU result:\n");
