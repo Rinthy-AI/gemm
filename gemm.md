@@ -1,7 +1,7 @@
 ---
 title: GEMM on Jetson
 author: Bradley Gannon
-date: 2024-07-15
+date: 2024-07-22
 lang: en-US
 publish: false
 ---
@@ -161,7 +161,15 @@ has dimensions $M \times N$.
 
 We'll need the `MNK` values as individual constants later, so we'll use
 preprocessor logic to define them now. For brevity, I've hidden most of the
-logic.
+logic.[^unsigned-long]
+
+[^unsigned-long]: It may seem strange that we're using `unsigned long` for such
+small constant values. In fact, you'll see this throughout the program. The
+only reason I've done this is to make things easier when computing large
+values, such as the number of eOPS in the overall operation or the number of
+bytes in an input matrix. If I declared these values as `int` or similar, I'd
+have to worry about rollover, but this way I can avoid all that. I don't know
+whether or not this affects performance, but I doubt it.
 
 ```cpp
 #if defined(MNK_16x16x16)
@@ -410,13 +418,15 @@ dimension of the block size equal to the warp size. Thread IDs count along the
 
 Here's an area where I'm slightly confused. At first, I set the `y` and `z`
 dimensions of the block size to 1, since that seemed like a reasonable guess.
-When I ran the program through the profiler, it complained about low occupancy.
-I don't fully understand occupancy, but it seems like it's more or less a
-measure of how well the blocks fit in the streaming multiprocessors (SMs). If
-occupancy is low, then the kernel isn't using all of the SM's resources. I
-think of this kind of like packing a car. If your bags and boxes are too big,
-then you can't fill up all the available volume, but if they're small then you
-can pack more efficiently by fitting them together.
+When I ran the program through the profiler, it complained about low
+[occupancy][occupancy].  I don't fully understand occupancy, but it seems like
+it's more or less a measure of how well the blocks fit in the streaming
+multiprocessors (SMs). If occupancy is low, then the kernel isn't using all of
+the SM's resources. I think of this kind of like packing a car. If your bags
+and boxes are too big, then you can't fill up all the available volume, but if
+they're small then you can pack more efficiently by fitting them together.
+
+[occupancy]: https://docs.nvidia.com/gameworks/content/developertools/desktop/analysis/report/cudaexperiments/kernellevel/achievedoccupancy.htm
 
 Anyway, I played with the `y` and `z` dimensions for a while to increase the
 occupancy, and I landed on 4. It's almost completely arbitrary and probably not
@@ -427,6 +437,8 @@ outputs instead of just one.
 We also have to set up the grid dimensions, which need to work out so that
 there are exactly enough blocks to cover the entire output. This is one of many
 cases in this kind of programming where careful arithmetic is essential.
+
+TODO a diagram would be helpful here; how do the blocks map to the output matrix?
 
 ```cpp
 const unsigned int  WARP_SIZE        = 32;
@@ -445,15 +457,16 @@ those simplifications, we come to the expression below. First, we have to
 multiply every element of $\mathbf{A}$ by a scalar, so that's $M \times K$
 operations. For every element in $\mathbf{C}$, we know that we have to multiply
 $K$ pairs of elements. We also have to add them all together, which adds
-another $K - 1$ operations. The scalar multiplication by $\beta$ and the final
-summation each add another $M \times N$ operations, giving a total of
+another $K - 1$ operations *per element of* $\mathbf{C}$. The scalar
+multiplication by $\beta$ and the final summation each add another $M \times N$
+operations, giving a total of
 
 $$MK + (K + K - 1)MN + 2MN$$
 
 I call this value the total number of "effective operations" or "eOPS". The "e"
 is there to remind the reader that this value isn't really a perfect
 representation of what the kernel is actually doing. It's more like a measure
-of how many operations you would have to do if you were doing GEMM the naive
+of how many operations you *would* have to do if you were doing GEMM the naive
 way, such as in the CPU verification routine.
 
 ```cpp
@@ -501,7 +514,11 @@ void printMat(ELEMENT* mat, int rows, int cols);
 # Kernel
 
 This is the code that actually runs on the GPU. Let's examine the function
-signature first.
+signature first. `A`, `B`, and `C` are pointers to arrays, and `r_A`, `inner`,
+and `c_B` represent their dimensions. Three dimensions are enough here because
+`A` and `B` must have equal numbers of columns and rows, respectively, and `C`
+must have `r_A` rows and `c_B` columns. `alpha` and `beta` are the scalar
+coefficients.
 
 ```cpp
 __global__ void d_gemm(
@@ -516,7 +533,24 @@ __global__ void d_gemm(
 ) {
 ```
 
-TODO
+Next we set a convenient namespace and assign some useful variables. Most of
+the stuff we touch in this kernel is in the `nvcuda::wmma` namespace, so
+changing the namespace in just this scope improves readability. `warp_row` and
+`warp_col` describe what output tile this warp is responsible for. Recall that
+tensor core operations need an entire warp to cooperate, and we defined our
+block and grid dimensions to account for that. These two variables tell us
+where the top-left corner element is in `C`. `tile_run` tells us how many times
+we need to move along the inner dimension to accumulate all of the
+contributions from the inputs.
+
+TODO diagram showing how `warp_{row,col}` map to the matrices
+
+If this is confusing, it may help to remember that while this implementation
+does use the tensor cores, it's still more or less a naive CUDA matmul. We're
+still doing dot products over the rows and columns of the inputs. The big
+difference is that the "elements" of the matmul are now these multi-element
+tiles. If you're familiar with element-wise tiling, this is basically the same
+thing but with different function calls.
 
 ```cpp
     using namespace nvcuda::wmma;
@@ -525,7 +559,31 @@ TODO
     int tile_run = inner / WMMA_K;
 ```
 
-TODO
+The tensor core API requires that we load data into `fragment`s, which are
+opaque structures that contain some matrix elements to be used in an operation.
+We have to explicitly declare which kind of matrix a fragment contains in the
+matmul operation (`matrix_a`, `matrix_b`, or `accumulator`), as well as how big
+the fragment is, what type the elements are, and how to index the source
+matrices (`row_major` or `col_major`). That last bit gives us a convenient way
+to accomplish transposition. If the corresponding input matrix is supposed to
+be transposed, we declare the fragment as `col_major`. The `accumulator`
+fragment is not affected by transposition.
+
+We also define an index expression that accounts for the transposition. Note
+that the `x` and `y` arguments to `IDX` are flipped, and also we refer to an
+undeclared variable `i`. When we use this macro in a loop below, the `i`
+variable will contain the inner dimension position.
+
+At the top of this block, we also have to optionally change the fragment type
+when using `tf32`. The reason is that `tf32` seems to act more or less like a
+passthrough type for `float`, even though the bits are different. According to
+the [Nvidia docs][tf32-docs], you have to pass this alternate type to the
+fragments in order to get the benefits of `tf32` on the tensor cores. I'm not
+certain I'm doing this right, since the docs also mention `__float_to_tf32`,
+which I can't find anywhere else online, and which I haven't used in this
+kernel. In all other cases, the actual input type is sufficient.
+
+[tf32-docs]: https://docs.nvidia.com/cuda/cuda-c-programming-guide/#alternate-floating-point
 
 ```cpp
     #if defined(TF32_IN_F32_OUT)
@@ -550,7 +608,21 @@ TODO
     fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, OUTPUT_ELEMENT> C_frag;
 ```
 
-TODO
+We'll begin in earnest by loading the output tile into the `accumulator`
+fragment and scaling it by `beta`. `load_matrix_sync` takes the target
+fragment, a pointer to the top-left element, the leading dimension (columns of
+`C` in this case), and the storage layout. It coordinates all of the threads in
+the warp to do the load from global memory `sync`hronously. Then, we iterate
+over each element and scale by `beta`.[^scaling] We do this before the matmul
+because we're going to accumulate partial results in `C_frag`, which would make
+it impossible to scale just the original values by `beta` later on.
+
+[^scaling]: It's just occuring to me now that this might not make sense. Each
+thread in the warp is going to run this `for` loop, so it seems like the
+scaling should be done multiple times per element, which isn't what we want.
+The kernel's output matches against `h_gemm`, so maybe the compiler is smart
+enough to see what we're doing and parallelize it across the warp. Or maybe I'm
+wrong about this being a problem at all.
 
 ```cpp
     load_matrix_sync(C_frag, C + IDX(warp_row, warp_col, c_B), c_B, mem_row_major);
@@ -565,7 +637,15 @@ TODO
     }
 ```
 
-TODO
+Just like an ordinary matrix multiplication, we walk along the inner dimension,
+multiplying and accumulating tiles as we go. We also scale the elements in the
+tile from `A` by `alpha`. `mma_sync` runs the multiply-add operation over the
+last three arguments and accumulates the result in the first argument. It also
+supports this "in-place" operation where the first and last arguments are the
+same. At the end of the outer loop, `C_frag` contains the correct GEMM outputs
+for this warp's tile.
+
+TODO: like previous diagram, but emphasize walking along K dimension
 
 ```cpp
     for (int i = 0; i < tile_run; i++) {
@@ -578,7 +658,9 @@ TODO
     }
 ```
 
-TODO
+Finally, we call another warp-level function to store the values of `C_frag`
+into the correct location in `C`, which is ultimately a store operation into
+global memory.
 
 ```cpp
     store_matrix_sync(C + IDX(warp_row, warp_col, c_B), C_frag, c_B, mem_row_major);
@@ -587,34 +669,40 @@ TODO
 
 # Main Function
 
-Now we come to the entry point of the program.
+Now we come to the entry point of the program. Everything from here on is more
+or less just a test harness for the kernel we saw above.
 
 ```cpp
 int main() {
 ```
 
-## Host Allocation and Initialization
+## Printing Test Information
 
-First, we check that the dimensions of the blocks and grids match the number of
-elements in the output matrix. It's easy to get these wrong because reasoning
-about all the different loops and dimensions is often difficult. This runtime
-check catches a decent number of errors in this category.
-
-We assume that `NUM_BLOCKS.z` is equal to `1`, which implies a two-dimensional
-grid. We also assume that `NUM_THREADS.x` is equal to `WARP_SIZE`. The tensor
-cores work most efficiently when the maximum number of warps per scheduler are
-executing the same instruction, so we encourage that by setting that as one of
-the block dimensions. We know that the dimensions of a single tensor core
-output matrix are equal to `(WMMA_N, WMMA_M)` elements. Both of those values
-come straight from Nvidia's documentation and are `#define`d above. All we need
-to do is multiply the number of elements per output tile by the number of
-tiles, and we'll get the number of output elements for this configuration. That
-value should always match the number of elements in the actual output array.
+For convenience in testing, we begin by printing out some decently formatted
+information about the GEMM operation we're about to run. We also check that the
+dimensions of the blocks and grids match the number of elements in the output
+matrix. It's easy to get these wrong because reasoning about all the different
+loops and dimensions is often difficult. This runtime check catches a decent
+number of errors in this category.
 
 To allocate memory for our three matrices, we need to know their sizes in
 bytes. We'll compute those values now by finding the number of elements and
 then multiplying that value by the number of bytes per element. We also print
 the dimensions and sizes of the matrices.
+
+It's useful to know the [arithmetic intensity][arith-intens] of the
+computation, which is the ratio of the total number of math operations to the
+total number of bytes that need to move during the computation. This figure
+gives some insight into whether or not the computation will be limited by the
+compute performance or memory bandwidth of the target platform.
+
+[arith-intens]: https://en.wikipedia.org/wiki/Roofline_model#Arithmetic_intensity
+
+The code in this area is somewhat verbose and not at all interesting, so I've
+hidden it.
+
+<details>
+<summary>Click to show/hide test information code</summary>
 
 ```cpp
     #if defined(F16_IN_F32_OUT) || defined(F16_IN_OUT)
@@ -721,18 +809,6 @@ the dimensions and sizes of the matrices.
         sizeof(OUTPUT_ELEMENT),
         SIZE_C_PADDED
     );
-```
-
-Now we print some information about the operation we're about to run. It's
-useful to know the [arithmetic intensity][arith-intens] of the computation,
-which is the ratio of the total number of math operations to the total number
-of bytes that need to move during the computation. This figure gives some
-insight into whether or not the computation will be limited by the compute
-performance or memory bandwidth of the target platform.
-
-[arith-intens]: https://en.wikipedia.org/wiki/Roofline_model#Arithmetic_intensity
-
-```cpp
     size_t TOTAL_SIZE = SIZE_A + SIZE_B + SIZE_C;
     printf("Total eOPS   : %13llu\n", TOTAL_EOPS);
     printf("Input size   : %13lu B\n", SIZE_A + SIZE_B);
@@ -748,13 +824,17 @@ performance or memory bandwidth of the target platform.
     );
 ```
 
-Set the random seed to a fixed value so we always get the same element values
-for a given configuration. This eliminates a source of random variation in
-performance.
+</details>
+
+Now we'll set the random seed to a fixed value so we always get the same
+element values for a given configuration. This eliminates a source of random
+variation in performance and makes debugging less frustrating.
 
 ```cpp
     srand(0);
 ```
+
+## Host Allocation and Initialization
 
 Now we allocate memory for `A`, `B`, and `C` and initialize them to random
 values. Note our use of `INPUT_ELEMENT` and `OUTPUT_ELEMENT` in the calls to
@@ -776,11 +856,20 @@ our input matrices `A` and `B` have dimensions that aren't multiples of the
 corresponding tensor core sizes, then we're going to end up missing the "extra"
 values that sit outside the last tiles. We can't just run for an extra tile to
 get those values because we'd end up reading values from beginnings of the
-*next* rows and exceed the boundaries of the matrices on the last rows.
+*next* rows and exceeding the boundaries of the matrices on the last rows.
 Instead, we need to allocate padded versions of the matrices with dimensions
 that *are* a multiple of the tensor core dimensions and fill the unneeded
-values with zeros. Then, after the kernel is done running, we'll need to
-extract the values we want from the output to get the true result.
+values with zeros so they don't affect the computation. Then, after the kernel
+is done running, we'll need to extract the values we want from the output to
+get the true result.[^kernel-padding]
+
+TODO diagram demonstrating overrun problem and padding solution
+
+[^kernel-padding]: It would be better to do this padding in the kernels because
+the time spent padding would be parallelized. I haven't bothered to do that
+here, and I think it requires some nontrivial changes. I'm not sure how to
+handle the padded tiles if the given device array doesn't have enough capacity
+for them.
 
 ```cpp
     INPUT_ELEMENT* h_A_padded = (INPUT_ELEMENT*)malloc(SIZE_A_PADDED);
@@ -788,7 +877,17 @@ extract the values we want from the output to get the true result.
     OUTPUT_ELEMENT* h_C_padded = (OUTPUT_ELEMENT*)malloc(SIZE_C_PADDED);
 ```
 
-TODO
+We want the padded matrices to have identical values to the unpadded ones where
+they're defined and zeros elsewhere. The logic below accomplishes that for
+`h_A_padded`, and I've hidden the rest because it's the same thing with
+different pointers and iteration boundaries. We also time this operation and
+print the duration. For size 10,000 square matrices and `I8_IN_I32_OUT`, this
+takes about 115 ms on the Jetson's CPU.
+
+Rather than touch every element individually, this logic uses `memcpy` to grab
+an entire row of the unpadded matrix and copy it to the padded version. Then,
+it fills in zeros in the remaining columns. For any extra rows, separate logic
+fills one row with zeros and then `memcpy`s those as needed.
 
 ```cpp
     chrono::steady_clock::time_point start = chrono::steady_clock::now();
@@ -812,6 +911,12 @@ TODO
             COLS_A_PADDED * sizeof(INPUT_ELEMENT)
         );
     }
+```
+
+<details>
+<summary>Click to show/hide padding logic for other matrices</summary>
+
+```cpp
     for (int r = 0; r < ROWS_B_PADDED; r++) {
         memcpy(
             h_B_padded + IDX(r, 0, COLS_B_PADDED),
@@ -852,26 +957,31 @@ TODO
             COLS_C_PADDED * sizeof(INPUT_ELEMENT)
         );
     }
+```
+
+</details>
+
+```cpp
     chrono::steady_clock::time_point end = chrono::steady_clock::now();
     unsigned long pad_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
     printf("Padding      : %13lu μs\n\n", pad_elapsed);
 ```
 
 If we're going to do CPU verification later, then we need an original copy of
-the `C` matrix. GEMM modifies `C` in the general case, so running the kernel
-changes the values in `h_C` after copying them back from the GPU.  We'll save a
-copy of the original values in `h_C_orig`. We don't actually need to do this
-unless `DO_CPU_VERIFY` is `true`, but adding the extra logic to handle
-conditionally allocating and freeing the memory isn't worth the benefit in my
-opinion, so we just do it every time.
+the `C` matrix so we can run GEMM a second time. The GEMM operation modifies
+`C` in the general case, so running the kernel changes the values in `h_C`
+after copying them back from the GPU.  We'll save a copy of the original values
+in `h_C_orig`. We don't actually need to do this unless `DO_CPU_VERIFY` is
+`true`, but adding the extra logic to handle conditionally allocating and
+freeing the memory isn't worth the benefit in my opinion, so we just do it
+every time.
 
 ```cpp
     OUTPUT_ELEMENT* h_C_orig = (OUTPUT_ELEMENT*)malloc(SIZE_C);
     memcpy(h_C_orig, h_C, SIZE_C);
 ```
 
-If `DEBUG_OUTPUT` is `true`, then we'll print whether `A` and `B` will be
-transposed during the operation, as well as the initial contents of `A`, `B`,
+If `DEBUG_OUTPUT` is `true`, then we'll print the initial contents of `A`, `B`,
 and `C`. The `printMat` function is generic over the element type—just like
 `initMatrix` above—and prints the matrix elements in a format that can be
 easily copied into a Python REPL.
@@ -911,22 +1021,20 @@ include the device initialization in our speed measurement. We can avoid that
 by initializing the device explicitly now.
 
 ```cpp
-    cudaError_t initResult = cudaInitDevice(0, cudaDeviceScheduleAuto, 0);
-    if (initResult != cudaSuccess) {
-        printf("Failed to init device\n");
-        return 1;
-    }
+    cudaInitDevice(0, cudaDeviceScheduleAuto, 0);
 ```
 
 ## Kernel Launch and Speed Measurement
 
 We're finally done setting up. We can launch the kernel and measure the time it
-takes to execute. The call to `cudaDeviceSynchronize` guarantees that the GPU
-will finish its most recent kernel before advancing to the next line. Normally,
-CPU execution continues after a kernel launch—which is the point of having a
-GPU at all—and that's usually the desired behavior. In this case, we *want*
-to block on the kernel's execution because we're trying to measure how long it
-takes to run.
+takes to execute. We pass `NUM_BLOCKS` and `NUM_THREADS` as the launch
+parameters, and we pass device pointers and other constants as arguments to the
+kernel. The call to `cudaDeviceSynchronize` guarantees that the GPU will finish
+its most recent kernel before advancing to the next line. Normally, CPU
+execution continues after a kernel launch—which is the point of having a GPU at
+all—and that's usually the desired behavior. In this case, we *want* to block
+on the kernel's execution because we're trying to measure how long it takes to
+run.
 
 ```cpp
     start = chrono::steady_clock::now();
@@ -944,8 +1052,8 @@ takes to run.
     end = chrono::steady_clock::now();
 ```
 
-Get the number of microseconds between the start and end of the kernel's
-runtime, and then report some information about its effective speed.
+Now we'll get the number of microseconds between the start and end of the
+kernel's runtime and then report its effective speed.
 
 ```cpp
     long d_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
@@ -953,7 +1061,11 @@ runtime, and then report some information about its effective speed.
     printf("Device       : %13lu μs (%11f eTOPS)\n", d_elapsed, eops / 1e12);
 ```
 
-TODO
+To complete the operation---and to optionally check its correctness---we need
+to copy the result back to the CPU and undo the padding operation we did
+earlier. This logic is a lot simpler than the initial padding. We'll also
+measure and report its duration a little further down. For the case I mentioned
+above, the total execution time is about 50 ms on the CPU.
 
 ```cpp
     cudaMemcpy(h_C_padded, d_C, SIZE_C_PADDED, cudaMemcpyDeviceToHost);
@@ -971,7 +1083,10 @@ TODO
 
 ## Checking the Result
 
-TODO
+If the corresponding constants are enabled, then we'll print out the matrix
+contents and/or run the CPU version of GEMM to check our results from the GPU.
+For comparison, it's also fun to measure the runtime of the naive CPU
+implementation to see how much faster the GPU is.
 
 ```cpp
     if (DEBUG_OUTPUT) {
@@ -984,7 +1099,7 @@ TODO
         end = chrono::steady_clock::now();
         unsigned long h_elapsed = chrono::duration_cast<chrono::microseconds>(end - start).count();
         printf(
-            "Host         : %13lu μs (%11f eTOPS)\n\n",
+            "Host         : %13lu μs (%11f eTOPS)",
             h_elapsed,
             (static_cast<double>(TOTAL_EOPS) / (static_cast<double>(h_elapsed) / 1e6)) / 1e12
         );
@@ -993,14 +1108,14 @@ TODO
             printMat<OUTPUT_ELEMENT>(h_C_orig, ROWS_C, COLS_C);
         }
         if (verify(h_C_orig, h_C)) {
-            printf("Extraction   : %13lu μs\n\n", extract_elapsed);
-            printf("Output correct\n");
+            printf(" CORRECT\n\n");
         } else {
-            printf("===== Output NOT correct =====\n");
+            printf(" WRONG\n\n");
         }
     } else {
-        printf("Host         :       skipped\n");
+        printf("Host         :       skipped\n\n");
     }
+    printf("Extraction   : %13lu μs\n", extract_elapsed);
 ```
 
 ## Cleaning Up
@@ -1022,6 +1137,46 @@ terminates, but for completeness we might as well do it ourselves.
     return 0;
 }
 ```
+
+## Remarks on Optimization
+
+I spent a lot of late nights learning about optimization techniques for this
+kernel and trying to implement them. (It was not healthy.) I became reluctant
+friends with `ncu` and Nsight Compute, the profiling tools for CUDA kernels.
+All I can say for sure after all that work is that I have only begun to
+understand a small fraction of what's out there. But, I'm told this is a good
+sign because it means I've left the safety of the [Dunning-Kruger
+effect][dk-effect].
+
+[dk-effect]: https://en.wikipedia.org/wiki/Dunning%E2%80%93Kruger_effect
+
+As written, `d_gemm` does not make optimal use of the resources on the Jetson.
+In particular, it seems to be memory-bound, which makes sense to me because the
+kernel is constantly loading tiles from global memory, and adjacent warps are
+loading *the same tiles* from `A` and `B`. I tried doing a "tiling of tiles"
+with shared memory, but aside from a lot of headaches with indexing, I didn't
+get too far. I never wrote a correct implementation, but once my best attempt
+started getting close, it became clear that it wasn't going to be faster.
+
+There is definitely room for improvement, but it's notable that cuBLAS runs
+SGEMM (single-precision GEMM) at about 1.7 eTOPS, while this implementation
+gets about 0.8 eTOPS (~47%) with `TF32_IN_F32_OUT`. I don't know if that's a
+fair comparison, but it's probably somewhat reasonable. I'm ~~happy with~~
+ready to accept 2x headroom for this project, since it's nominally about
+learning (like all my projects).
+
+Notably, transposition seems to make a big difference in performance. When
+`TRANSPOSE_B` is `true`, the performance for `I8_IN_I32_OUT` increases by about
+3x. As with other implementations, I guess this is due to improved coalescing /
+cache performance when reading `B` as rows instead of columns. I definitely
+don't understand how to make optimal use of this yet.
+
+If I do come back to this in the future to apply optimizations, I'll probably
+start by trying to understand what cuBLAS does that's so much faster. It seems
+more likely that when I get back around to playing with GPUs again, I'll want
+to use my basic general CUDA knowledge to work on a different kernel where
+custom code is valuable, such as fusion of otherwise discrete kernels to save
+on memory traffic.
 
 # Appendix: Utility Functions
 
@@ -1111,7 +1266,7 @@ matrix because this function should only operate on the output matrix `C`. The
 dimensions of `C` are stored in constants `ROWS_C` and `COLS_C`, so we use
 those directly. We need to supply different strings to `printf` in the mismatch
 case because different output types require different [conversion
-specifiers][conv-spec].
+specifications][conv-spec].
 
 [flop-error]: https://en.wikipedia.org/wiki/Floating-point_arithmetic#Accuracy_problems
 [conv-spec]: https://en.cppreference.com/w/cpp/io/c/fprintf
@@ -1176,9 +1331,9 @@ void initMatrix(ELEMENT* mat, int len) {
 
 Print the contents of the supplied matrix in a way that can be copied and
 pasted into a Python REPL. This means that the whole matrix and each row must
-be surrounded by `[]` and the elements and rows must be separated by `,`. We
-loop over the rows and colums, emitting characters and elements as necessary to
-satisfy these requirements. As with `verify` above, different `printf` calls
+be surrounded by `[]` and the elements and rows must be separated by a comma.
+We loop over the rows and colums, emitting characters and elements as necessary
+to satisfy these requirements. As with `verify` above, different `printf` calls
 are needed depending on the type.
 
 This function is only called when `DEBUG_OUTPUT` is `true`. For large matrices,
