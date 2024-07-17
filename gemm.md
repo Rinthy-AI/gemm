@@ -438,8 +438,6 @@ We also have to set up the grid dimensions, which need to work out so that
 there are exactly enough blocks to cover the entire output. This is one of many
 cases in this kind of programming where careful arithmetic is essential.
 
-TODO a diagram would be helpful here; how do the blocks map to the output matrix?
-
 ```cpp
 const unsigned int  WARP_SIZE        = 32;
 const dim3          NUM_THREADS        (WARP_SIZE,4,4);
@@ -543,7 +541,23 @@ where the top-left corner element is in `C`. `tile_run` tells us how many times
 we need to move along the inner dimension to accumulate all of the
 contributions from the inputs.
 
-TODO diagram showing how `warp_{row,col}` map to the matrices
+<figure>
+<img alt="Three squares labelled A, B, and C representing the matrices; two
+pairs of parallel lines extend from the left of A and the top of B to meet in
+C; the lines in A are labelled warp_row and the lines in B are labelled
+warp_col; the horizontal lines are separated by WMMA_M and the vertical lines
+are separated by WMMA_N; the inner dimension is labelled with tile_run, and the
+tiles in A and B are labelled with WMMA_K for their columns and rows,
+respectively" src="warp-row-col.svg" style="box-shadow: unset">
+<figcaption>
+Mapping between `warp_row`/`warp_col` and the output matrix. Note that these
+values are just offsets along their corresponding dimensions, so they encode
+the *first* row or column covered by the current warp. Together, they uniquely
+point to the *top-left* element of the output tile. Each tile is `WMMA_M` by
+`WMMA_N` elements. I emphasize all this because it's easy to get confused
+between tiles and elements.
+</figcaption>
+</figure>
 
 If this is confusing, it may help to remember that while this implementation
 does use the tensor cores, it's still more or less a naive CUDA matmul. We're
@@ -645,7 +659,20 @@ supports this "in-place" operation where the first and last arguments are the
 same. At the end of the outer loop, `C_frag` contains the correct GEMM outputs
 for this warp's tile.
 
-TODO: like previous diagram, but emphasize walking along K dimension
+<figure>
+<img alt="Like the previous diagram, except now the inner dimension is divided
+into several tile-sized chunks in A and B, and the current tiles in each matrix
+are labelled with IDX_A and IDX_B, respectively"
+src="walk-along-k-dimension.svg" style="box-shadow: unset">
+<figcaption>
+`IDX_A` and `IDX_B` are macros, so the preprocessor replaces them with their
+definitions before compilation. These definitions include the variable `i`,
+which is incrementing along the inner dimension in units of `WMMA_K`. The
+macros convert this value into the correct offset in the corresponding matrix.
+Note that the indices are shown as offsets from the left-most column / top row,
+but actually they're the offsets to the top-left elements of the current tiles.
+</figcaption>
+</figure>
 
 ```cpp
     for (int i = 0; i < tile_run; i++) {
@@ -863,13 +890,29 @@ values with zeros so they don't affect the computation. Then, after the kernel
 is done running, we'll need to extract the values we want from the output to
 get the true result.[^kernel-padding]
 
-TODO diagram demonstrating overrun problem and padding solution
-
 [^kernel-padding]: It would be better to do this padding in the kernels because
 the time spent padding would be parallelized. I haven't bothered to do that
 here, and I think it requires some nontrivial changes. I'm not sure how to
 handle the padded tiles if the given device array doesn't have enough capacity
 for them.
+
+<figure>
+<img alt="Two matrices, one padded and the other unpadded, with the same access
+pattern for the final (lower-right) tile shown"
+src="overrun-problem-padding-solution.svg" style="box-shadow: unset">
+<figcaption>
+On the left, the program is trying to access the final tile in an unpadded
+matrix. The green portion is correct, but the red portions are either incorrect
+or out of bounds. On the right, the program accesses the same position and size
+in a padded matrix. The gray portions are zero. In the padded version, all
+loaded data is correct and in bounds. This is also an unintentional example of
+something approaching [Mondrian-style abstract art][mondrian]. (See also the
+[Piet programming language][piet-lang].)
+</figcaption>
+</figure>
+
+[mondrian]: https://en.wikipedia.org/wiki/Piet_Mondrian#Paris_(1918%E2%80%931938)
+[piet-lang]: https://esolangs.org/wiki/Piet
 
 ```cpp
     INPUT_ELEMENT* h_A_padded = (INPUT_ELEMENT*)malloc(SIZE_A_PADDED);
