@@ -1,11 +1,3 @@
----
-title: GEMM on Jetson
-author: Bradley Gannon
-date: 2024-07-22
-lang: en-US
-publish: true
----
-
 **TL;DR:** I wrote a C++ program that demonstrates a general matrix multiply
 (GEMM) implementation for the [Jetson AGX Orin devkit][devkit]. The `gemm`
 program uses the [tensor cores][tensor-cores] available on that platform and
