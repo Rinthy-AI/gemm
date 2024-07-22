@@ -3,7 +3,7 @@ title: GEMM on Jetson
 author: Bradley Gannon
 date: 2024-07-22
 lang: en-US
-publish: false
+publish: true
 ---
 
 **TL;DR:** I wrote a C++ program that demonstrates a general matrix multiply
@@ -11,8 +11,8 @@ publish: false
 program uses the [tensor cores][tensor-cores] available on that platform and
 allows for arbitrary use of the supported input and output types (except
 [sub-byte types][sub-byte]). There are no external software dependencies aside
-from CUDA.  The performance is nowhere near cuBLAS, but the code may be useful
-as a reference.
+from CUDA.  The performance is at least 2x worse than cuBLAS, but the code may
+be useful as a reference.
 
 [devkit]: https://developer.nvidia.com/embedded/jetson-developer-kits
 [tensor-cores]: https://www.nvidia.com/en-us/data-center/tensor-cores/
@@ -21,14 +21,13 @@ as a reference.
 # Purpose and Structure
 
 This post is a **literate program**. That means that this file contains a
-complete program within it, in addition to explanatory natural language
-throughout. All you need to do to get the source code is extract the lines in
-all the code blocks and concatenate them. To run the code, clone [the
-repo][github] and run `make`. You need `nvcc`, CUDA, and Python. The compiled
-binary will be in the repo root and is called `gemm`. To play with other input
-and output types, matrix dimensions, transposition, and other parameters,
-change the `#define`s and constants in the code according to the descriptions
-below.
+complete program within it, along with explanatory natural language throughout.
+All you need to do to get the source code is extract the lines in all the code
+blocks and concatenate them. To run the code, clone [the repo][github] and run
+`make`. You need `nvcc`, CUDA, and Python. The compiled binary will be in the
+repo root and is called `gemm`. To play with other input and output types,
+matrix dimensions, transposition, and other parameters, change the `#define`s
+and constants in the code according to the descriptions below.
 
 [github]: https://github.com/Rinthy-AI/gemm
 
@@ -57,15 +56,15 @@ $\alpha$ and $\beta$ are real scalars. $\mathbf{A}$ and/or $\mathbf{B}$ may be
 transposed at the user's option.
 
 Note that $\mathbf{C}$ appears on both sides of the assignment operator. This
-means that the existing values of $\mathbf{C}$ must be a part of the inputs to
-the GEMM algorithm *and also* the outputs must be stored in $\mathbf{C}$. In
-practice, to avoid intermediate allocations we have to compute
+means that $\mathbf{C}$ is an input *and* the output. We have to be careful not
+to overwrite the initial values in $\mathbf{C}$ until after we're done with
+them. In practice, to avoid intermediate allocations we have to compute
 $\beta\mathbf{C}$ first and then accumulate the results of
 $\alpha\mathbf{A}\mathbf{B}$ into $\mathbf{C}$ second.
 
 I chose GEMM as the goal for this program because of its usefulness in machine
-learning. Understanding some CUDA and how GEMM works with the tensor cores has
-value for any future work we might do in this area.
+learning. Developing skills with handwritten CUDA kernels that use tensor cores
+may be useful for future projects.
 
 ## Includes
 
@@ -96,9 +95,10 @@ using namespace std;
 Here we define our inputs and outputs. The tensor cores [are
 modelled][tc-model] as special coprocessing units that perform the operations
 $\mathbf{D} = \mathbf{A}\mathbf{B} + \mathbf{C}$ or $\mathbf{C} =
-\mathbf{A}\mathbf{B} + \mathbf{C}$. The tensor cores only support a fixed set
-of input and output types, where $\mathbf{A}$ and $\mathbf{B}$ are considered
-inputs and $\mathbf{C}$ and $\mathbf{D}$ are outputs. To choose a particular
+\mathbf{A}\mathbf{B} + \mathbf{C}$. Note that these are *matrices*, not
+elements. The tensor cores only support a fixed set of input and output types,
+where $\mathbf{A}$ and $\mathbf{B}$ are considered inputs and $\mathbf{C}$ and
+$\mathbf{D}$ are outputs (or "accumulators"). To choose a particular
 input/output type pair, we `#define` a corresponding identifier. The supported
 type pairs and their corresponding identifiers are listed in the table
 below,[^sub-byte-support] which I have copied from [here][types-table].
@@ -200,10 +200,13 @@ whether or not this affects performance, but I doubt it.
     const unsigned long WMMA_K =   4;
 #else
     #error "No MNK setting selected"
-#endif
 ```
 
 </details>
+
+```cpp
+#endif
+```
 
 Now we define the actual input and output types for our selected type pair
 using `typedef`. In all future code, we'll use `INPUT_ELEMENT` and
@@ -276,12 +279,15 @@ they're not that interesting.
     #ifndef MNK_8x8x4
         #error "Selected WMMA dimensions are not supported for F64_IN_OUT"
     #endif
+```
+
+</details>
+
+```cpp
 #else
     #error "No input/output type selected"
 #endif
 ```
-
-</details>
 
 The definition of GEMM allows the user to transpose $\mathbf{A}$ and/or
 $\mathbf{B}$. These `#define`s encode that information. I originally made these
@@ -306,10 +312,10 @@ matrix. However, as we'll see later, we can play with the inputs to this macro
 to get efficient in-place transposition.
 
 Note that everything is over-parenthesized because this is a macro, and the
-arguments are *expressions*, not values. If `x` is something like `idx /
-NUM_ROWS`, then without parentheses the order of operations might not play out
-how we'd expect. (This bit me during development.) To ensure that the arguments
-are evaluated first, we wrap them up in parens.
+arguments are *expressions*, not values. If `y_max` is something like `a + b`,
+then without parentheses the order of operations might not play out how we'd
+expect. (This bit me during development.) To ensure that the arguments are
+evaluated first, we wrap them up in parens.
 
 ```cpp
 #define IDX(x, y, y_max) ((x) * (y_max) + (y))
@@ -455,7 +461,7 @@ those simplifications, we come to the expression below. First, we have to
 multiply every element of $\mathbf{A}$ by a scalar, so that's $M \times K$
 operations. For every element in $\mathbf{C}$, we know that we have to multiply
 $K$ pairs of elements. We also have to add them all together, which adds
-another $K - 1$ operations *per element of* $\mathbf{C}$. The scalar
+another $K - 1$ operations *per element* of $\mathbf{C}$. The scalar
 multiplication by $\beta$ and the final summation each add another $M \times N$
 operations, giving a total of
 
@@ -541,7 +547,6 @@ where the top-left corner element is in `C`. `tile_run` tells us how many times
 we need to move along the inner dimension to accumulate all of the
 contributions from the inputs.
 
-<figure>
 <img alt="Three squares labelled A, B, and C representing the matrices; two
 pairs of parallel lines extend from the left of A and the top of B to meet in
 C; the lines in A are labelled warp_row and the lines in B are labelled
@@ -549,15 +554,13 @@ warp_col; the horizontal lines are separated by WMMA_M and the vertical lines
 are separated by WMMA_N; the inner dimension is labelled with tile_run, and the
 tiles in A and B are labelled with WMMA_K for their columns and rows,
 respectively" src="warp-row-col.svg" style="box-shadow: unset">
-<figcaption>
-Mapping between `warp_row`/`warp_col` and the output matrix. Note that these
-values are just offsets along their corresponding dimensions, so they encode
-the *first* row or column covered by the current warp. Together, they uniquely
-point to the *top-left* element of the output tile. Each tile is `WMMA_M` by
-`WMMA_N` elements. I emphasize all this because it's easy to get confused
-between tiles and elements.
-</figcaption>
-</figure>
+
+>Mapping between `warp_row`/`warp_col` and the output matrix. Note that these
+>values are just offsets along their corresponding dimensions, so they encode
+>the *first* row or column covered by the current warp. Together, they uniquely
+>point to the *top-left* element of the output tile. Each output tile is
+>`WMMA_M` by `WMMA_N` elements. I emphasize all this because it's easy to get
+>confused between tiles and elements.
 
 If this is confusing, it may help to remember that while this implementation
 does use the tensor cores, it's still more or less a naive CUDA matmul. We're
@@ -580,8 +583,9 @@ matmul operation (`matrix_a`, `matrix_b`, or `accumulator`), as well as how big
 the fragment is, what type the elements are, and how to index the source
 matrices (`row_major` or `col_major`). That last bit gives us a convenient way
 to accomplish transposition. If the corresponding input matrix is supposed to
-be transposed, we declare the fragment as `col_major`. The `accumulator`
-fragment is not affected by transposition.
+be transposed, we declare the fragment as `col_major`, even though the
+underlying data is in row-major order. The `accumulator` fragment is not
+affected by transposition.
 
 We also define an index expression that accounts for the transposition. Note
 that the `x` and `y` arguments to `IDX` are flipped, and also we refer to an
@@ -624,12 +628,13 @@ kernel. In all other cases, the actual input type is sufficient.
 
 We'll begin in earnest by loading the output tile into the `accumulator`
 fragment and scaling it by `beta`. `load_matrix_sync` takes the target
-fragment, a pointer to the top-left element, the leading dimension (columns of
-`C` in this case), and the storage layout. It coordinates all of the threads in
-the warp to do the load from global memory `sync`hronously. Then, we iterate
-over each element and scale by `beta`.[^scaling] We do this before the matmul
-because we're going to accumulate partial results in `C_frag`, which would make
-it impossible to scale just the original values by `beta` later on.
+fragment, a pointer to the top-left element, the leading dimension (number of
+columns in `C`, in this case), and the storage layout. It coordinates all of
+the threads in the warp to do the load from global memory `sync`hronously.
+Then, we iterate over each element and scale by `beta`.[^scaling] We do this
+before the matmul because we're going to accumulate partial results in
+`C_frag`, which would make it impossible to scale just the original values by
+`beta` later on.
 
 [^scaling]: It's just occuring to me now that this might not make sense. Each
 thread in the warp is going to run this `for` loop, so it seems like the
@@ -655,24 +660,21 @@ Just like an ordinary matrix multiplication, we walk along the inner dimension,
 multiplying and accumulating tiles as we go. We also scale the elements in the
 tile from `A` by `alpha`. `mma_sync` runs the multiply-add operation over the
 last three arguments and accumulates the result in the first argument. It also
-supports this "in-place" operation where the first and last arguments are the
-same. At the end of the outer loop, `C_frag` contains the correct GEMM outputs
-for this warp's tile.
+supports "in-place" operation, where the first and last arguments are the same.
+At the end of the outer loop, `C_frag` contains the correct GEMM outputs for
+this warp's tile.
 
-<figure>
 <img alt="Like the previous diagram, except now the inner dimension is divided
 into several tile-sized chunks in A and B, and the current tiles in each matrix
 are labelled with IDX_A and IDX_B, respectively"
 src="walk-along-k-dimension.svg" style="box-shadow: unset">
-<figcaption>
-`IDX_A` and `IDX_B` are macros, so the preprocessor replaces them with their
-definitions before compilation. These definitions include the variable `i`,
-which is incrementing along the inner dimension in units of `WMMA_K`. The
-macros convert this value into the correct offset in the corresponding matrix.
-Note that the indices are shown as offsets from the left-most column / top row,
-but actually they're the offsets to the top-left elements of the current tiles.
-</figcaption>
-</figure>
+
+>`IDX_A` and `IDX_B` are macros, so the preprocessor replaces them with their
+>definitions before compilation. These definitions include the variable `i`,
+>which is incrementing along the inner dimension in units of `WMMA_K`. The
+>macros convert this value into the correct offset in the corresponding matrix.
+>Note that the indices are shown as offsets from the left-most column / top row,
+>but actually they're the offsets to the top-left elements of the current tiles.
 
 ```cpp
     for (int i = 0; i < tile_run; i++) {
@@ -705,17 +707,17 @@ int main() {
 
 ## Printing Test Information
 
-For convenience in testing, we begin by printing out some decently formatted
-information about the GEMM operation we're about to run. We also check that the
-dimensions of the blocks and grids match the number of elements in the output
-matrix. It's easy to get these wrong because reasoning about all the different
-loops and dimensions is often difficult. This runtime check catches a decent
-number of errors in this category.
+For convenience in testing, we begin by printing out some information about the
+GEMM operation we're about to run. We also check that the dimensions of the
+blocks and grids match the number of elements in the output matrix. It's easy
+to get these wrong because reasoning about all the different loops and
+dimensions is often difficult. This runtime check catches a decent number of
+errors in this category.
 
 To allocate memory for our three matrices, we need to know their sizes in
-bytes. We'll compute those values now by finding the number of elements and
-then multiplying that value by the number of bytes per element. We also print
-the dimensions and sizes of the matrices.
+bytes. We'll compute those values now by finding the number of elements for
+each matrix and then multiplying that value by the number of bytes per element.
+We also print the dimensions and sizes of the matrices.
 
 It's useful to know the [arithmetic intensity][arith-intens] of the
 computation, which is the ratio of the total number of math operations to the
@@ -896,20 +898,17 @@ here, and I think it requires some nontrivial changes. I'm not sure how to
 handle the padded tiles if the given device array doesn't have enough capacity
 for them.
 
-<figure>
 <img alt="Two matrices, one padded and the other unpadded, with the same access
 pattern for the final (lower-right) tile shown"
 src="overrun-problem-padding-solution.svg" style="box-shadow: unset">
-<figcaption>
-On the left, the program is trying to access the final tile in an unpadded
-matrix. The green portion is correct, but the red portions are either incorrect
-or out of bounds. On the right, the program accesses the same position and size
-in a padded matrix. The gray portions are zero. In the padded version, all
-loaded data is correct and in bounds. This is also an unintentional example of
-something approaching [Mondrian-style abstract art][mondrian]. (See also the
-[Piet programming language][piet-lang].)
-</figcaption>
-</figure>
+
+>On the left, the program is trying to access the final tile in an unpadded
+>matrix. The green portion is correct, but the red portions are either incorrect
+>or out of bounds. On the right, the program accesses the same position and size
+>in a padded matrix. The gray portions are zero. In the padded version, all
+>loaded data is correct and in bounds. This is also an unintentional example of
+>something approaching [Mondrian-style abstract art][mondrian]. (See also the
+>[Piet programming language][piet-lang].)
 
 [mondrian]: https://en.wikipedia.org/wiki/Piet_Mondrian#Paris_(1918%E2%80%931938)
 [piet-lang]: https://esolangs.org/wiki/Piet
@@ -1217,9 +1216,9 @@ don't understand how to make optimal use of this yet.
 If I do come back to this in the future to apply optimizations, I'll probably
 start by trying to understand what cuBLAS does that's so much faster. It seems
 more likely that when I get back around to playing with GPUs again, I'll want
-to use my basic general CUDA knowledge to work on a different kernel where
-custom code is valuable, such as fusion of otherwise discrete kernels to save
-on memory traffic.
+to use my basic CUDA knowledge to work on a different kernel where custom code
+is valuable, such as fusion of otherwise discrete kernels to save on memory
+traffic.
 
 # Appendix: Utility Functions
 
@@ -1353,10 +1352,10 @@ bool verify(OUTPUT_ELEMENT* h_solution, OUTPUT_ELEMENT* h_C) {
 Nothing special here. Just loop over all of the elements in the array and
 choose a [`rand`][rand]om value for each one. We use the modulo operator to
 keep the values between `0` and `16`. As long as the generic `ELEMENT` supports
-casting from `int`, then we're all good. Note that we don't need to care about
-the fact that the input is actually a matrix. Since the elements are stored as
-a contiguous sequence in memory, the dimensionality doesn't matter as long as
-we touch all the elements and don't overrun. We depend on the caller to give us
+casting from `int`, we're all good. Note that we don't need to care about the
+fact that the input is actually a matrix. Since the elements are stored as a
+contiguous sequence in memory, the dimensionality doesn't matter as long as we
+touch all the elements and don't overrun. We depend on the caller to give us
 the right value of `len`, which should be the product of the dimensions.
 
 [rand]: https://cplusplus.com/reference/cstdlib/rand/
